@@ -55,19 +55,26 @@ export function createMap({ scene, camera, renderer, labelHost, products, onOpen
   }
 
   // ---------- Pandangan preset (dunia) ----------
-  const ews = SITES['ews-longsor'], aw = SITES['awlr-sungai'], vn = SITES['vnotch'];
+  const ews = SITES['ews-longsor'], aw = SITES['awlr-sungai'], vn = SITES['vnotch'], hu = SITES['ews-banjir'], ar = SITES['arr'];
+  const local = (s, [x, y, z]) => [x * Math.cos(s.rot) + z * Math.sin(s.rot), y, -x * Math.sin(s.rot) + z * Math.cos(s.rot)];   // lokal stasiun → arah dunia
   const VIEWS = {
     // Pandangan default (dipilih user): dari atas sawah menghadap sungai & tebing — EWS, AWLR, pintu air, V-Notch sekaligus
-    ikhtisar: { tgt: [56.07, -10, 17.49], off: [-156.51, 55.82, 158.67] },
-    ews: { tgt: [ews.x, -3, ews.z + 6], off: [30, 16, 42] },
-    awlr: { tgt: [aw.x + 2, aw.y, aw.z + 4], off: [-22, 13, 30] },
-    vnotch: { tgt: [vn.x - 1, vn.y + 1, vn.z - 2], off: [-16, 11, -18] },         // kolam V-Notch di hulu saluran tersier
+    ikhtisar: { tgt: [35.99, -11.95, 94.07], off: [-273.08, 145.98, 166.81] },
+    // Pandangan per stasiun (dipilih user dari tangkapan layar), relatif terhadap letak stasiun
+    ews: { tgt: [ews.x + 5.67, ews.y - 2.67, ews.z + 5.78], off: [17.39, 9.81, 22.65] },     // lereng T1–T5 & stasiun di puncak tebing
+    awlr: { tgt: [aw.x + 9.86, aw.y - 0.02, aw.z + 0.38], off: [-23.49, 4.89, 3.85] },      // menyusuri sungai ke hulu, pintu air di seberang
+    vnotch: { tgt: [vn.x + 3.21, vn.y + 0.67, vn.z + 0.33], off: [-13.3, 3.54, 2.59] },     // stasiun & kolam V-Notch, sungai & AWLR di latar
+    // EWS Banjir: dari hilir di sisi darat — muka krangkeng, horn & lampu, lengan sensor di atas alur hulu
+    hulu: { tgt: local(hu, [2.0, 1.8, 0.3]).map((v, i) => v + [hu.x, hu.y, hu.z][i]), off: local(hu, [-7.0, 4.4, 13.2]) },
+    // ARR: dari sisi sawah — muka krangkeng, lengan & sensor hujan, saluran primer & tersier di latar
+    arr: { tgt: local(ar, [0.35, 1.8, 0.2]).map((v, i) => v + [ar.x, ar.y, ar.z][i]), off: local(ar, [-4.6, 2.8, 8.4]) },
   };
   const viewPose = name => { const v = VIEWS[name], t = new V3(...v.tgt); return { p: new V3(...v.off).add(t), t }; };
 
   const _v = new V3();
   return {
     views: VIEWS, viewPose, pickAt, hover,
+    setStatus(id, st) { const s = byId(id); if (s && st && s.tag.dataset.st !== st) s.tag.dataset.st = st; },   // warna titik (normal / waspada / …)
     setShown(on) { shown = on; if (!on) { for (const L of labels) { L.el.hidden = true; L.vis = false; } ring.visible = false; hover(null); } },
     update(now, w, h) {
       if (!shown) return;

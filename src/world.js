@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { makeRiver } from './river.js';
 import { buildClouds, buildRing, buildTrees, groundTexture, placeSpots } from './nature.js';
 import { makeSawah } from './sawah.js';
+import { buildFlood } from './flood.js';
+import { BANK, ENV, VN_H0, vnQ } from './env.js';
 
 // ============================================================================================================
 // Dunia digital twin bersama (satuan m). Peta kawasan & setiap tampilan per logger memakai dunia yang SAMA —
@@ -14,6 +16,7 @@ import { makeSawah } from './sawah.js';
 //     V-Notch berdiri di tepi saluran primer
 //   - perbukitan berhutan makin tinggi menjauh, lembah sungai berlanjut di antaranya
 // Letak & bentuk kawasan = diorama skematis (karangan), bukan data lokasi.
+// Muka air sungai, genangan banjir (flood.js), saluran sawah & V-Notch, awan dan laju arus mengikuti env.js (setEnv).
 // ============================================================================================================
 const smooth = (x, a, b) => THREE.MathUtils.smoothstep(x, a, b), lerp = THREE.MathUtils.lerp, V3 = THREE.Vector3;
 
@@ -81,6 +84,8 @@ export const ROAD = { u: 24, w: 4 };                    // jalan desa di lembah 
 
 // ---------- Sungai AWLR: kerangka lokal AWLR (stasiun di titik asal, +x ke sungai, arus menuju +z) ----------
 export const RIVER = { width: 6, bankX: 1.5, water: -0.9, bed: -1.6, slope: 0.3 };
+// Elevasi diorama untuk bacaan Tinggi Muka Air (mdpl): y dunia 0 (punggung tebing EWS) = MDPL0. Contoh — ganti dari data survei.
+export const MDPL0 = 125;
 const XC = RIVER.bankX + RIVER.slope * -RIVER.water + RIVER.width / 2;          // sumbu alur dari stasiun AWLR
 const RF = { x: 30, dr: 62 };                                                  // stasiun AWLR di x dunia 30, sungai ± 62 m dari tepi tebing
 export const AWLR_POS = { x: RF.x, y: -CLIFF.drop, z: zCrestS(RF.x) + RF.dr - XC };
@@ -96,14 +101,31 @@ const RS = 0.007, riverLevelL = zl => RIVER.water - RS * THREE.MathUtils.clamp(z
 export const riverAt = wx => AWLR_POS.y + riverLevelL(RF.x - wx);           // y dunia muka air sungai di x dunia
 export const SAWAH = makeSawah({ zRiver, halfW: wx => riverHalfW(RF.x - wx), riverAt });
 
+// ---------- EWS Banjir di hulu (± 290 m ke hulu dari AWLR, titik pilihan user; tepi sisi tebing): lengan sensor tegak lurus alur, muka krangkeng,
+// horn & lampu menghadap ke hilir. Tiang ± 1 m di belakang puncak tebing sungai (lereng 1 : 1,1 di atas air); pad diratakan
+// 0,9 m di atas muka air normal seperti tebing di AWLR (bacaan sensor & ambang sama). Letak = diorama (karangan). ----------
+export const HULU = (() => {
+  const xc = 320, zl = RF.x - xc, hw = riverHalfW(zl), e = 0.5;
+  const dz = (zRiver(xc + e) - zRiver(xc - e)) / (2 * e), len = Math.hypot(dz, 1), nx = -dz / len, nz = 1 / len;   // normal tepi → sumbu
+  const dP = hw + BANK * 0.91 + 1.0;                                              // jarak tiang dari sumbu alur
+  return { xc, hw, dP, x: xc - nx * dP, z: zRiver(xc) - nz * dP, rot: Math.atan2(-1, -dz), water: riverAt(xc) };
+})();
+// Muka air sungai (m dari normal) di x dunia: hilir AWLR = dh, hulu EWS Banjir = dhUp, di antaranya gelombang banjir menjalar
+const riverK = wx => THREE.MathUtils.clamp((wx - RF.x) / (HULU.xc - RF.x), 0, 1);
+export const dhAt = (E, wx) => E.dh + (E.dhUp - E.dh) * riverK(wx);
+ENV.kIntake = riverK(SAWAH.intakeX);
+
 // ---------- Letak stasiun (dunia) ----------
 export const SITES = {
   'ews-longsor': { x: 0, z: 0, rot: 0 },
   'awlr-sungai': { x: AWLR_POS.x, z: AWLR_POS.z, rot: -Math.PI / 2, h: 4, flat: [14, 40] },
-  'arr': { x: -82, z: -64, rot: 0.3, clear: 30, flat: [10, 30] },
+  // ARR di ujung saluran primer / pangkal saluran tersier sawah (titik pilihan user), di luar dinding saluran; muka krangkeng
+  // menghadap hamparan sawah (−z). Tanah koridor saluran di sini sudah datar (sawah.js carve).
+  'arr': (() => { const T = SAWAH.tertiaryHead, x = T.xEnd - 0.5; return { x, z: zRiver(x) + T.dOuter + 1.8, rot: Math.PI, clear: 5 }; })(),
   'awr': { x: 112, z: -104, rot: 2.4, clear: 20, hill: [52, 6], flat: [6, 16] },
   'awlr-sumur': { x: 76, z: zRiver(76) + 32, rot: 0.6, clear: 14, flat: [8, 24] },
   'vnotch': { ...SAWAH.vnotchSpot, clear: 6 },
+  'ews-banjir': { x: HULU.x, z: HULU.z, rot: HULU.rot, h: 4, flat: [9, 26], clear: 12, pad: HULU.water + BANK },
 };
 SITES['awlr-sumur'].well = [SITES['awlr-sumur'].x + 2, SITES['awlr-sumur'].z];
 const segDist = (x, z, [x0, z0], [x1, z1]) => {
@@ -113,7 +135,7 @@ const segDist = (x, z, [x0, z0], [x1, z1]) => {
 
 // ---------- Tinggi dasar: tebing + bukit AWR + perataan di stasiun + hamparan sawah & saluran + perbukitan jauh ----------
 const hillOf = (x, z, s) => { if (!s.hill) return 0; const d = Math.hypot(x - s.x, z - s.z) / s.hill[0]; return d < 1 ? s.hill[1] * (1 - d * d) ** 2 : 0; };
-for (const s of Object.values(SITES)) if (s.flat) s.level = profile(s.z - zCrest(s.x)) + hillOf(s.x, s.z, s);
+for (const s of Object.values(SITES)) if (s.flat) s.level = s.pad ?? profile(s.z - zCrest(s.x)) + hillOf(s.x, s.z, s);
 function base(wx, wz) {
   const u = wz - zCrest(wx);
   let y = cliffGround(wx, u);
@@ -183,6 +205,8 @@ function treeFree(x, z, rad) {
   if (x > 2 && x < 38 && u > 18 && u < 50) return false;                         // kamera "Lihat lembah" EWS
   const I = worldInfo(x, z); if (I.bank || I.d < I.hw + 4.5 + rad) return false; // sungai & tebing sungai
   const [xl, zl] = toA(x, z); if (xl > -14 && xl < 1.8 && zl > 1.5 && zl < 32) return false;   // kamera Iso AWLR
+  { const H = SITES['ews-banjir'], dx = x - H.x, dz = z - H.z, c = Math.cos(H.rot), sn = Math.sin(H.rot), lx = dx * c - dz * sn, lz = dx * sn + dz * c;
+    if (lx > -11 && lx < 3 && lz > 0 && lz < 18) return false; }                // kamera EWS Banjir (dari hilir, sisi darat)
   for (const s of Object.values(SITES)) if (Math.hypot(x - s.x, z - s.z) < (s.clear ?? 9) + rad) return false;
   if (SAWAH.dist(x, z) < 1.5 + rad) return false;                               // sawah, saluran, pintu air
   return true;
@@ -219,7 +243,8 @@ export function march(lo, hi, bands, grow = 0.07, maxStep = 4) {
 //  - grid sungai AWLR (di bawah): baris = x dunia yang SAMA (WX), kolom mulai tepat di garis sambungan lalu mengikuti
 //    kelokan sungai → titik sambungan kedua grid identik, jadi medan menyambung tanpa celah.
 export const U_SPLIT = 34;
-export const WX = march(-180, 220, [[-26, 26, 0.25], [RF.x - 12, RF.x + 12, 0.3], [RF.x - 40, RF.x + 40, 0.45], [-112, 62, 1.2]], 0.07, 4);
+export const WX = march(-180, 380, [[-26, 26, 0.25], [RF.x - 12, RF.x + 12, 0.3], [RF.x - 40, RF.x + 40, 0.45], [-112, 62, 1.2],
+  [HULU.x - 14, HULU.x + 14, 0.3]], 0.07, 4);
 export const EWS_U = march(-180, U_SPLIT, [[-6, 17, 0.15]], 0.07, 4);
 const RIVER_U = march(-16, 200, [[-14, 14, 0.2], [12, 118, 1.2]], 0.07, 4), SEAM_K = 14;     // kolom relatif sumbu sungai + kolom peralihan
 function buildRiverSide() {
@@ -301,15 +326,33 @@ export function buildWorld() {
   root.add(buildRing(outerPerimeter(R), worldHeight, new V3(20, 0, 30)));
   const riverG = new THREE.Group();                                             // kerangka lokal AWLR
   riverG.position.set(AWLR_POS.x, AWLR_POS.y, AWLR_POS.z); riverG.rotation.y = -Math.PI / 2; root.add(riverG);
-  const water = RV.buildWater({ z0: -1500, z1: 1500, fine: [-260, 260], foam: 0.2 });
+  const water = RV.buildWater({ z0: -1500, z1: 1500, fine: [RF.x - WX.at(-1) - 10, 260], foam: 0.2 });   // pita rapat sampai ujung hulu grid
   riverG.add(water, RV.rocks({ z0: -90, z1: 90, avoid: (x, z) => Math.abs(z) < 5 && x < XC }), RV.riprap({ z0: -14, z1: 14, side: -1 }));
   const sawah = SAWAH.build();
-  root.add(buildRoad(-180, 220), sawah.group, buildWell());
+  root.add(buildRoad(WX[0], Math.floor(WX.at(-1))), sawah.group, buildWell());
   root.add(buildTrees(worldTrees(), worldAt));
-  root.add(buildClouds());
-  const flows = [...water.userData.flow, ...sawah.flows];
+  const clouds = buildClouds(); root.add(clouds);
+  const flood = buildFlood({ zRiver, riverAt, xDown: RF.x, xUp: HULU.xc }); root.add(flood.mesh);
+  const flows = [...water.userData.flow, ...sawah.flows, ...flood.flows];
+  // Laju arus per kelompok (env.js): sungai makin deras saat naik & lambat saat surut; saluran ikut pintu pengambilan
+  const mul = { river: 1, canal: 1, spill: 1, flood: 1 }, Q0 = vnQ(VN_H0);
+  const cloudC = new THREE.Color(), _w = new THREE.Color();
   return {
     group: root, heightAt: worldHeight,
-    update(dt) { for (const f of flows) { f.tex.offset.y -= f.v * dt; if (f.u) f.tex.offset.x += f.u * dt; } },   // arus, riak & buih
+    update(dt) { for (const f of flows) { const k = mul[f.g] ?? 1; f.tex.offset.y -= f.v * k * dt; if (f.u) f.tex.offset.x += f.u * k * dt; } },   // arus, riak & buih
+    // E = ENV (env.js), sky = pipeline.state (siang/malam, warna cakrawala), dt = detik nyata
+    setEnv(E, sky, dt) {
+      const rainK = THREE.MathUtils.clamp(E.rainVis / 30, 0, 1);
+      water.userData.setLevel(E.dh, rainK, { dh: E.dhUp, z: RF.x - HULU.xc });      // lokal AWLR: z = RF.x − x dunia
+      const reach = flood.update(E.dh, E.dhUp, BANK, dt);
+      sawah.setWater(E, Q0, wx => dhAt(E, wx));
+      const dm = Math.max(E.dh, E.dhUp);
+      mul.river = dm < 0 ? THREE.MathUtils.clamp(1 + dm / 0.7, 0.25, 1) : 1 + 1.3 * dm;
+      mul.canal = THREE.MathUtils.clamp(E.qLag, 0, 1.6); mul.spill = THREE.MathUtils.clamp(Math.sqrt(E.Q / Q0), 0, 2.2);
+      // awan: putih siang, kemerahan saat cakrawala keemasan, gelap kebiruan malam, kelabu saat mendung
+      cloudC.setScalar(0.22 + 0.78 * sky.day).lerp(_w.copy(sky.hor).multiplyScalar(1.1), 0.35).lerp(_w.setRGB(0.42, 0.44, 0.47).multiplyScalar(0.3 + 0.7 * sky.day), 0.75 * E.cloud);
+      for (const sp of clouds.children) { sp.material.color.copy(cloudC); sp.material.opacity = 0.8 + 0.2 * E.cloud; }
+      return { reach };
+    },
   };
 }

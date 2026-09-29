@@ -6,8 +6,8 @@ import { ICONS, PRODUCTS, productById } from './products.js';
 const home = document.getElementById('home'), viewerEl = document.getElementById('viewer');
 const icon = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] ?? ICONS.station}</svg>`;
 
-// EWS & AWLR Sungai berdiri di peta (dunia bersama); seri lain dibuka di lokasinya saat dipilih dari daftar.
-const MAP_IDS = ['ews-longsor', 'awlr-sungai', 'vnotch'];
+// EWS Longsor, AWLR Sungai, V-Notch, EWS Banjir & ARR berdiri di peta (dunia bersama); seri lain dibuka di lokasinya saat dipilih dari daftar.
+const MAP_IDS = ['ews-longsor', 'awlr-sungai', 'vnotch', 'ews-banjir', 'arr'];
 let viewer = null;
 const list = document.getElementById('productGrid');
 list.innerHTML = PRODUCTS.map(p => `
@@ -23,7 +23,7 @@ for (const b of list.children) {
   b.addEventListener('pointerenter', () => viewer?.mapHover(id));
   b.addEventListener('pointerleave', () => viewer?.mapHover(null));
 }
-const VIEW_NAMES = { ikhtisar: 'Ikhtisar', ews: 'Tebing EWS', awlr: 'Sungai AWLR', vnotch: 'Sawah V-Notch' };
+const VIEW_NAMES = { ikhtisar: 'Ikhtisar', ews: 'Tebing EWS', awlr: 'Sungai AWLR', vnotch: 'Sawah V-Notch', arr: 'Sawah ARR', hulu: 'Hulu EWS Banjir' };
 const nav = document.getElementById('ovViews');
 for (const [k, label] of Object.entries(VIEW_NAMES)) {
   const b = Object.assign(document.createElement('button'), { type: 'button', textContent: label });

@@ -138,23 +138,38 @@ export function makeRiver(o) {
   };
 
   // ---------- Muka air (pita) + buih ----------
+  // Pita bisa dinaikkan / diturunkan (dh, m) dan dilebarkan (widen(z), m tiap sisi) tanpa membangun ulang indeks
   function ribbon(z0, z1, step, halfOf, y, mat, uvU, uvV) {
-    const pos = [], uv = [], idx = []; let s = 0, prev = null, i = 0;
+    const S = [], idx = []; let s = 0, prev = null, i = 0;
     for (let z = z0; z <= z1 + 1e-6; z += step(z), i++) {
-      const x = center(z), h = halfOf(z);
+      const x = center(z);
       if (prev) s += Math.hypot(x - prev[0], z - prev[1]);
       prev = [x, z];
-      const dx = center(z + 0.5) - center(z - 0.5), l = Math.hypot(dx, 1), nx = 1 / l, nz = -dx / l;   // normal horisontal alur
-      pos.push(x - nx * h, y(z), z - nz * h, x + nx * h, y(z), z + nz * h);
-      uv.push(0, s / uvV, 2 * h / uvU, s / uvV);
+      const dx = center(z + 0.5) - center(z - 0.5), l = Math.hypot(dx, 1);   // normal horisontal alur
+      S.push({ x, z, nx: 1 / l, nz: -dx / l, h: halfOf(z), y: y(z), s, invS: 1 / sAbove(z) });
       if (i) { const a = (i - 1) * 2; idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3); }
     }
+    const pos = new Float32Array(S.length * 6), uv = new Float32Array(S.length * 4);
     const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-    g.setIndex(idx); g.computeVertexNormals();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    g.setIndex(idx);
     const m = new THREE.Mesh(g, mat); m.receiveShadow = true; m.frustumCulled = false;
+    m.userData.set = (dhOf = 0, widen = null) => {                  // dhOf = angka atau fungsi (sampel) → m
+      S.forEach((p, k) => {
+        const dh = typeof dhOf === 'function' ? dhOf(p) : dhOf, h = p.h + (widen ? widen(p, dh) : 0), yy = p.y + dh;
+        pos.set([p.x - p.nx * h, yy, p.z - p.nz * h, p.x + p.nx * h, yy, p.z + p.nz * h], k * 6);
+        uv.set([0, p.s / uvV, 2 * h / uvU, p.s / uvV], k * 4);
+      });
+      g.attributes.position.needsUpdate = g.attributes.uv.needsUpdate = true;
+    };
+    m.userData.set(0);
+    g.computeVertexNormals();
     return m;
   }
+  // Muka air sungai. setLevel(dh, rain, up): naik / turun dh m dari muka air normal; up = { dh, z } → di hulu (z ≤ up.z) dh = up.dh,
+  // di antara z = 0 & up.z berubah linear (gelombang banjir menjalar ke hilir). Saat naik pita melebar mengikuti lereng tebing
+  // (dh / kemiringan) sehingga garis air tetap di tebing. Air makin keruh & buih makin banyak saat debit besar, arus melambat saat surut.
+  const MUD = new THREE.Color(0x86623e);
   function buildWater({ z0 = -1100, z1 = 1100, fine = [-120, 120], color = 0x6c6749, foam = 0.2, env = 0.75, part } = {}) {
     const step = z => (z > fine[0] && z < fine[1] ? 0.5 : 4);
     const streak = streakTexture(r), wn = waterNormalTexture(1, 1);
@@ -162,14 +177,30 @@ export function makeRiver(o) {
       roughness: 0.12, metalness: 0.05, envMapIntensity: env, transparent: true, opacity: 0.96 });
     const water = ribbon(z0, z1, step, z => halfW(z) + 0.5, level, mat, 1.7, 1.7);
     water.renderOrder = 1; if (part) water.userData.part = part;
-    const g = new THREE.Group(), flow = [{ tex: streak, v: 0.5 }, { tex: wn, v: 0.12, u: 0.02 }];
+    const g = new THREE.Group(), flow = [{ tex: streak, v: 0.5, g: 'river' }, { tex: wn, v: 0.12, u: 0.02, g: 'river' }];
     g.add(water); g.userData.flow = flow;                 // tekstur yang digulir tiap frame oleh pemilik tampilan
+    let f = null, fm = null;
     if (foam > 0) {                                    // buih tipis memanjang di tengah alur (arus deras)
       const ft = foamTexture(r);
-      const fm = new THREE.MeshStandardMaterial({ color: 0xffffff, map: ft, transparent: true, opacity: foam, depthWrite: false, roughness: 0.9 });
-      const f = ribbon(Math.max(z0, -400), Math.min(z1, 400), step, z => halfW(z) * (0.45 + 0.15 * Math.sin(z / 9)), z => level(z) + 0.012, fm, 3, 3);
-      f.renderOrder = 3; g.add(f); flow.push({ tex: ft, v: 0.8 });
+      fm = new THREE.MeshStandardMaterial({ color: 0xffffff, map: ft, transparent: true, opacity: foam, depthWrite: false, roughness: 0.9 });
+      f = ribbon(Math.max(z0, -400), Math.min(z1, 400), step, z => halfW(z) * (0.45 + 0.15 * Math.sin(z / 9)), z => level(z) + 0.012, fm, 3, 3);
+      f.renderOrder = 3; g.add(f); flow.push({ tex: ft, v: 0.8, g: 'river' });
     }
+    const c0 = new THREE.Color(color);
+    let last = '';
+    g.userData.mat = mat;
+    g.userData.setLevel = (dh, rain = 0, up = null) => {
+      const dm = up ? Math.max(dh, up.dh) : dh, turb = THREE.MathUtils.clamp((dm - 0.1) / 0.9, 0, 1);
+      mat.color.copy(c0).lerp(MUD, turb);
+      mat.normalScale.setScalar(0.32 + 0.45 * rain);                                 // riak tetes hujan
+      if (fm) fm.opacity = foam * THREE.MathUtils.clamp(1 + dh / 0.6, 0.15, 1) + 0.28 * turb;
+      const key = `${dh.toFixed(3)}|${up ? up.dh.toFixed(3) : ''}`;              // geometri dihitung ulang hanya bila muka air berubah
+      if (key === last) return;
+      last = key;
+      const dhOf = up ? p => dh + (up.dh - dh) * THREE.MathUtils.clamp(p.z / up.z, 0, 1) : dh;
+      water.userData.set(dhOf, (p, d) => Math.max(0, d) * p.invS);
+      f?.userData.set(dhOf);
+    };
     return g;
   }
   // Batu: di dasar (samar di bawah air) & di kaki tebing

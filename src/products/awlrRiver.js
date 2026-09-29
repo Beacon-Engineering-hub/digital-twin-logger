@@ -4,7 +4,8 @@ import { MAT } from '../materials.js';
 import { holedPlateXY, mesh, rodBetween } from '../geometry.js';
 import { dimension, tag } from '../labels.js';
 import { sp21Cable, POLE_GAP } from '../model/sp21.js';
-import { RIVER } from '../world.js';
+import { AWLR_POS, MDPL0, RIVER } from '../world.js';
+import { ENV, STATUS, levelStatus } from '../env.js';
 
 // AWLR Sungai (satuan m). Dari gambar kerja "3D Bracket AWLR" + keterangan user:
 // lengan = rangka 2 pipa (atas 3000, bawah 3100, celah 100) + 4 pipa tegak jarak 1000, cat biru, dilas ke pipa sleeve
@@ -25,12 +26,12 @@ const CL = { w: 0.04, t: 0.005, earL: 0.03 };           // klem sling 2 bagian (
 const PLATE_T = 0.006;                                  // dudukan sensor
 
 // Tinggi-tinggi lengan dari tinggi pasang box (lengan tepat di atas krangkeng)
-function armLevels(encY) {
+export function armLevels(encY) {
   const yA0 = encY + CAGE.H / 2000 + ARM.aboveCage;     // bawah sleeve
   const yb = yA0 + 0.09, yt = yb + 2 * ARM.pipeR + ARM.gap;   // sumbu pipa bawah / atas
   return { yA0, yb, yt, ySC: yt + ARM.pipeR + ARM.slingUp };  // ySC = sumbu klem sling
 }
-const sensorBottom = yb => yb - ARM.pipeR - PLATE_T - 0.048 - SENSOR.hornL;
+export const sensorBottom = yb => yb - ARM.pipeR - PLATE_T - 0.048 - SENSOR.hornL;
 
 // Klem 2 bagian di tiang (lokal: setengah depan +Z, kuping ±X, baut sepanjang Z). earLx = panjang kuping +X.
 function poleClamp(ro, earLx, extraHoleX) {
@@ -67,7 +68,9 @@ function pipe(len, axis, r = ARM.pipeR, wall = ARM.pipeWall) {
   return axis === 'x' ? g.rotateZ(-Math.PI / 2) : g;
 }
 
-function extend(model) {
+// opts (dipakai juga EWS Banjir): level() = muka air di stasiun ini (m dari normal, env.js), river = { xc, width, part, label }
+// = sumbu & lebar alur di depan stasiun untuk label / dimensi sungai (bawaan: penampang RIVER di stasiun AWLR)
+function extend(model, opts = {}) {
   const d = model.userData.d, S = model.userData.station, ro = S.ro;
   const { yA0, yb, yt, ySC } = armLevels(d.encY);
   const x0 = SLEEVE.R - 0.003;                          // pangkal pipa lengan (dilas ke sleeve)
@@ -224,7 +227,8 @@ function extend(model) {
   sNut.add(at(mesh(new THREE.CylinderGeometry(Sn.nutR, Sn.nutR, 0.018, 6), steel, 'awlrSensor'), xc, pb - 0.009, 0));   // mur kunci di bawah dudukan
   const snTag = tag('Sensor radar level air', 'awlrSensor'); snTag.position.set(xc + Sn.housingR, pt + 0.06, 0); sensor.add(snTag);
   const yBot = sensorBottom(yb);
-  sensor.add(dimension([xc + 0.12, yBot, 0], [xc + 0.12, RIVER.water, 0], [0.03, 0, 0], `${(yBot - RIVER.water).toFixed(2)} m ke muka air`, 12));
+  const lvDim = dimension([xc + 0.12, yBot, 0], [xc + 0.12, RIVER.water, 0], [0.03, 0, 0], `${(yBot - RIVER.water).toFixed(2)} m ke muka air`, 12);
+  sensor.add(lvDim); U.lvDim = { dim: lvDim, x: xc + 0.12, yBot }; U.yBot = yBot;   // ikut muka air (env.js)
 
   // ---------- Kabel sensor dalam conduit hitam → konektor SP21 kedua di box ----------
   // Naik di sisi depan-kanan tiang (di belakang krangkeng), berbelok di bawah sleeve, lalu menyusuri sisi pipa bawah.
@@ -239,13 +243,77 @@ function extend(model) {
 
   // ---------- Sungai: bagian dari dunia bersama (world.js — alur, tebing berpita, pasangan batu, batu, air, pohon),
   // dibangun main.js sebagai lingkungan stasiun ini. Di sini hanya label & dimensi lebar muka air. ----------
-  const R = RIVER, XC = R.bankX + R.slope * -R.water + R.width / 2, wx0 = XC - R.width / 2, wx1 = XC + R.width / 2;
-  const rv = new THREE.Group(); root.add(rv);
-  const rTag = tag('Sungai (lebar 6 m)', 'river'); rTag.position.set(wx0 + 4.2, R.water + 0.02, 1.6); rv.add(rTag);
-  rv.add(dimension([wx0, R.water + 0.01, 2.5], [wx1, R.water + 0.01, 2.5], [0, 0, 0.12], `${R.width.toFixed(2)} m`, 30));
+  const R = RIVER, RO = opts.river ?? {}, XC = RO.xc ?? R.bankX + R.slope * -R.water + R.width / 2, RW = RO.width ?? R.width;
+  const wx0 = XC - RW / 2, wx1 = XC + RW / 2;
+  const rv = U.rv = new THREE.Group(); root.add(rv);                               // naik-turun bersama muka air
+  const rTag = tag(`${RO.label ?? 'Sungai'} (lebar ${+RW.toFixed(1)} m)`, RO.part ?? 'river'); rTag.position.set(wx0 + 0.7 * RW, R.water + 0.02, 1.6); rv.add(rTag);
+  rv.add(dimension([wx0, R.water + 0.01, 2.5], [wx1, R.water + 0.01, 2.5], [0, 0, 0.12], `${RW.toFixed(2)} m`, 30));
 
   U.lift = d.yTop - yA0 + 0.15;                           // sleeve diangkat sampai lepas dari ujung tiang
+  U.lastDh = null; U.level = opts.level ?? (() => ENV.dh);
   model.userData.awlr = U;
+}
+
+// ---------- Simulasi muka air (env.js): bacaan sensor radar = jarak muka sensor ke muka air ----------
+let ui = null;
+function setDim(D, yW) {                                  // garis dimensi sensor → muka air (6 titik: A, B, 2 tanda tiap ujung)
+  const [line, lbl] = D.dim.children, p = line.geometry.attributes.position, T = 0.03;
+  [[D.x, D.yBot], [D.x, yW], [D.x - T, D.yBot], [D.x + T, D.yBot], [D.x - T, yW], [D.x + T, yW]].forEach(([x, y], i) => p.setXYZ(i, x, y, 0));
+  p.needsUpdate = true; line.geometry.computeBoundingSphere();
+  lbl.position.set(D.x, (D.yBot + yW) / 2, 0);
+  lbl.element.textContent = `${(D.yBot - yW).toFixed(2)} m ke muka air`;
+}
+function update(now, { model }) {
+  const U = model.userData.awlr;
+  if (!U) return false;
+  const dh = U.level();
+  if (U.lastDh === null || Math.abs(dh - U.lastDh) > 0.002) {
+    U.lastDh = dh; setDim(U.lvDim, RIVER.water + dh); U.rv.position.y = dh;
+  }
+  if (ui && now - ui.t > 200) { ui.t = now; ui.sync(); }
+  return false;
+}
+const ST_COLOR = { low: '#93c5fd', good: '#46d78f', warn: '#f4cf6a', alert: '#f7a766', crit: '#ff7a6b' };
+const TESTS = [['Surut', -0.4], ['Normal', 0], ['Siaga', 0.72], ['Banjir', 1.35]];
+// 3 parameter AWLR (dipakai juga EWS Banjir): dh = muka air di stasiun (m dari normal), siteY = y dunia tanah stasiun
+//   Tinggi Muka Air (mdpl) = elevasi muka air; Kedalaman = muka air − dasar sungai; Pembacaan sensor = jarak radar → muka air
+export function awlrReadings(encY, dh, siteY) {
+  const w = RIVER.water + dh;
+  return { tma: MDPL0 + siteY + w, depth: Math.max(0, w - RIVER.bed), read: sensorBottom(armLevels(encY).yb) - w };
+}
+export const readingRows = td => `
+      <tr><td>Tinggi muka air</td><td data-k="tma" ${td}></td></tr>
+      <tr><td>Kedalaman</td><td data-k="depth" ${td}></td></tr>
+      <tr><td>Pembacaan sensor</td><td data-k="read" ${td}></td></tr>`;
+export function fillReadings(tb, R) {
+  tb.querySelector('[data-k="tma"]').textContent = `${R.tma.toFixed(2)} mdpl`;
+  tb.querySelector('[data-k="depth"]').textContent = `${R.depth.toFixed(2)} m`;
+  tb.querySelector('[data-k="read"]').textContent = `${R.read.toFixed(2)} m`;
+}
+function panel(el, { params, flyTo }) {
+  const td = 'style="text-align:right;font-weight:600"';
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;margin-bottom:8px"><span>Status muka air</span><output id="awSt" style="font-weight:700"></output></div>
+    <table id="awTab" style="width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;margin-bottom:12px">${readingRows(td)}
+    </table>
+    <div style="color:var(--muted);margin-bottom:6px">Uji muka air (manual)</div>
+    <div id="awTests" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:6px">${TESTS.map(([t, v]) => `<button type="button" data-v="${v}">${t}</button>`).join('')}</div>
+    <div class="btn-row"><button type="button" id="awAuto">Otomatis dari hujan</button><button type="button" id="awLook">Lihat sungai</button></div>`;
+  const $ = s => el.querySelector(s), btns = [...$('#awTests').children];
+  const o = Object.fromEntries(['awSt', 'awTab', 'awAuto'].map(k => [k, $('#' + k)]));
+  for (const b of btns) b.addEventListener('click', () => { ENV.auto = false; ENV.manual = +b.dataset.v; ENV.storm = null; sync(); });
+  o.awAuto.addEventListener('click', () => { ENV.auto = true; sync(); });
+  $('#awLook').addEventListener('click', () => flyTo([-2.2, 3.4, 9.5], [4.2, -0.4, 3.5], 1300));   // dari tebing stasiun, sensor & alur ke hilir
+  function sync() {
+    if (!o.awSt.isConnected) return;                                          // panel sudah diganti seri lain
+    const dh = ENV.dh, S = STATUS[levelStatus(dh)];
+    o.awSt.textContent = S.label; o.awSt.style.color = ST_COLOR[S.st];
+    fillReadings(o.awTab, awlrReadings(params.encY, dh, AWLR_POS.y));
+    for (const b of btns) { const on = !ENV.auto && Math.abs(ENV.manual - +b.dataset.v) < 0.005; b.style.borderColor = on ? 'var(--accent)' : ''; b.style.color = on ? 'var(--accent)' : ''; }
+    o.awAuto.style.borderColor = ENV.auto ? 'var(--accent)' : ''; o.awAuto.style.color = ENV.auto ? 'var(--accent)' : '';
+  }
+  ui = { sync, t: 0 };
+  sync();
 }
 
 // Explode: sensor dilepas dulu (sebelum kabel); sling, klem sling, lalu 8 baut sleeve dikendurkan dan
@@ -306,7 +374,7 @@ const parts = {
     ['Bentuk', 'Badan biru + horn kerucut stainless (sesuai foto)'],
     ['Ukuran', `Badan Ø${SENSOR.housingR * 2000} mm, horn ${SENSOR.hornL * 1000} mm (perkiraan)`],
     ['Pasang', 'Leher ulir lewat slot dudukan, dikunci mur'],
-    ['Tinggi ke muka air', `${(sensorBottom(armLevels(d.encY).yb) - RIVER.water).toFixed(2)} m`],
+    ['Tinggi ke muka air', `${(sensorBottom(armLevels(d.encY).yb) - RIVER.water - ENV.dh).toFixed(2)} m (saat ini)`],
     ['Kabel', 'Conduit hitam → konektor SP21 di box'],
   ]},
   river: { name: 'Sungai', group: 'AWLR Sungai', specs: () => [
@@ -323,7 +391,7 @@ export const awlrRiver = {
   encYMax: d => d.yTop - 0.9 - 0.2 - armLevels(0).ySC,    // klem sling tetap di bawah jari antipanjat
   // conduit panel surya menjauh dari tiang di sekitar sleeve (termasuk ruang turun 0,18 m saat explode)
   pvBulge: d => { const { yA0 } = armLevels(d.encY); return { y0: yA0 - 0.03, y1: yA0 + SLEEVE.len + 0.2, R: 0.095 }; },
-  extend, explode, parts,
+  extend, explode, parts, update, panel,
+  mapStatus: () => STATUS[levelStatus(ENV.dh)].st,
   views: { iso: [[-1.6, 3.6, 7.2], [2.4, 1.0, 0]] },
-  info: 'Lengan sensor 3 m di atas sungai lebar 6 m. Simulasi muka air belum dibuat.',
 };

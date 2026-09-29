@@ -2,8 +2,7 @@ import './style.css';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js';
-import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
-import { CAGE, INCH, STATION, derive } from './config.js';
+import { CAGE, STATION, derive } from './config.js';
 import { PARTS } from './parts.js';
 import { concreteTex } from './textures.js';
 import { LID_MAX, lidLimit } from './physics.js';
@@ -13,12 +12,15 @@ import { live } from './state.js';
 import { createPipeline, LAYER } from './render.js';
 import { SITES, buildWorld } from './world.js';
 import { createMap } from './mapView.js';
+import { ENV, stepEnv } from './env.js';
+import { createRain } from './weather.js';
+import { mountEnvPanel } from './envPanel.js';
 
 // Satu scene untuk semua: dunia bersama (world.js) + model lengkap tiap stasiun di lokasinya (SITES).
 // Mode peta (halaman awal) = kamera menjauh + penanda; mode logger = kamera mendekat ke stasiun + panel kontrol.
 // Karena scene-nya sama, saat titik di peta diklik tampilannya menyambung (bukan peta terpisah).
 // Koordinat scene = dunia; "lokal" = kerangka stasiun aktif (muka krangkeng +z) — pandangan & flyTo panel memakai lokal.
-const EN = { encY: +document.getElementById('encY').value };                      // tinggi pasang box awal (m)
+const EN = { encY: 1.5 };                                                         // tinggi pasang box (tengah box, m); dibatasi encRange
 let product = null, entry = null, params = null, mode = 'loading';               // produk aktif, datanya, ukuran stasiunnya
 const entries = {};                                                               // id → { prod, params, model }
 let MAP_IDS = [], onOpenCb = () => {};
@@ -56,9 +58,25 @@ const pipeline = createPipeline({ renderer, scene, camera, controls, sun, hemi }
 const invalidate = () => { pipeline.invalidateShadow(); };                        // posisi / bentuk benda berubah
 const requestRender = () => {};
 for (const ev of ['input', 'change', 'click', 'keydown']) addEventListener(ev, invalidate);
-if (import.meta.env.DEV) window.__twin = { renderer, pipeline, camera, controls };   // hook debug (hanya npm run dev)
+if (import.meta.env.DEV) window.__twin = { renderer, pipeline, camera, controls, env: ENV };   // hook debug (hanya npm run dev)
 
-let world = null, map = null;
+let world = null, map = null, envPanel = null;
+const rain = createRain(scene);                                   // hujan tampak (env.js → ENV.rainVis)
+
+// Tanah basah saat / sesudah hujan: medan (isGround) lebih gelap & lebih mengilap. Daftar bahan dikumpulkan ulang bila
+// ada model baru (mis. medan EWS dibangun ulang).
+let wetMats = null, wetLast = -1;
+function applyWet(w) {
+  if (!wetMats) {
+    wetMats = new Set(); wetLast = -1;
+    scene.traverse(o => { if (o.isMesh && o.userData.isGround) wetMats.add(o.material); });
+    for (const m of wetMats) m.userData.dry ??= { r: m.roughness, c: m.color.clone() };
+  }
+  const k = Math.round(w * 40) / 40;
+  if (k === wetLast) return;
+  wetLast = k;
+  for (const m of wetMats) { m.roughness = m.userData.dry.r - 0.3 * k; m.color.copy(m.userData.dry.c).multiplyScalar(1 - 0.24 * k); }
+}
 
 // ---------- State ----------
 let model = null, selected = null, hovered = null, tagObjs = [], dimLabels = [];
@@ -82,6 +100,7 @@ function makeModel(E) {
   const s = SITES[E.prod.id] ?? { x: 0, y: 0, z: 0, rot: 0 };
   m.position.set(s.x, s.y, s.z); m.rotation.y = s.rot; m.updateMatrixWorld(true);
   scene.add(m);
+  wetMats = null;                                                                 // medan baru ikut basah / kering
   return m;
 }
 function newEntry(prod) { return { prod, params: { ...STATION, ...prod.station, encY: EN.encY }, model: null }; }
@@ -92,11 +111,8 @@ function encRange() {                                        // batas tinggi pas
   let eMax = Math.floor((yP1 + params.height - 0.7 - 0.55 - d0.mpH / 2000) * 20) / 20;
   if (product?.encYMax) eMax = Math.min(eMax, Math.floor(product.encYMax(d0) * 20) / 20);   // batas tambahan per seri
   eMax = Math.max(eMin, eMax);
-  const ey = document.getElementById('encY');
-  ey.min = eMin; ey.max = eMax;
   const clamped = Math.min(eMax, Math.max(eMin, params.encY)), changed = clamped !== params.encY;
-  params.encY = clamped; ey.value = params.encY;
-  document.getElementById('encYOut').textContent = `${params.encY.toFixed(2)} m`;
+  params.encY = clamped;
   return changed;
 }
 function adoptModel() {                                      // model aktif: kumpulkan label & terapkan tampilan
@@ -198,7 +214,7 @@ function applyDims() {
 function refreshHighlight() {
   if (!model) return;
   model.traverse(o => {
-    if (!o.isMesh || !o.userData.part) return;
+    if (!o.isMesh || !o.userData.part || !o.material.emissive) return;           // bahan tanpa emissive (mis. MeshBasic) dilewati
     const sel = o.userData.part === selected, hov = o.userData.part === hovered;
     o.material.emissive.setHex(sel ? 0x1d5fd6 : hov ? 0x1d5fd6 : 0x000000);
     o.material.emissiveIntensity = sel ? 0.55 : hov ? 0.28 : 0;
@@ -245,7 +261,10 @@ renderer.domElement.addEventListener('pointerup', e => {
   if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return;
   if (mode === 'map') { const id = map?.pickAt(e); if (id) onOpenCb(id); return; }
   const part = pick(e);
-  if (part) select(part); else if (selected) { selected = null; refreshHighlight(); renderInfo(); }
+  if (part) { select(part); return; }
+  const other = mode === 'product' ? map?.pickAt(e) : null;                  // stasiun lain di dunia → pindah perangkat
+  if (other && other !== product?.id) { onOpenCb(other); return; }
+  if (selected) { selected = null; refreshHighlight(); renderInfo(); }
 });
 let hoverEv = null, lastMapHover = 0;                // raycast hover dikerjakan maksimal sekali per frame
 renderer.domElement.addEventListener('pointermove', e => { if (!e.buttons) hoverEv = e; });
@@ -284,10 +303,59 @@ function stepZoom(now) {
   return true;
 }
 
-// Terbang ke pose dunia (done dipanggil saat tiba; batas jarak orbit baru diterapkan setelah tiba)
+// Terbang ke pose dunia, lurus (pandangan panel Iso / Base / Box). done dipanggil saat tiba. Kamera selalu menatap titik pandang.
+// Pandangan panel (Iso, Lihat sensor, …) menggantikan gerak yang sedang berjalan: penutup gerak lama (mis. batas orbit
+// perangkat saat tiba dari peta) dijalankan dulu, agar kamera tidak tertahan batas orbit peta
+function endTween() { const d = tween?.done; if (tween) tween.done = null; d?.(); }
 function flyWorld(pos, target, dur = 900, done) {
+  endTween(); zoom.goal = null;
+  tween = { kind: 'line', p0: camera.position.clone(), t0: controls.target.clone(), p1: pos.clone(), t1: target.clone(), start: performance.now(), dur, done };
+}
+// Gerak otomatis peta ↔ perangkat: pan + zoom halus (van Wijk & Nuij, "Smooth and efficient zooming and panning" —
+// sama dengan d3.interpolateZoom): titik pandang bergeser lurus & jarak kamera berubah sehingga laju di layar terasa rata;
+// bila geseran jauh, kamera sedikit mundur di tengah lalu maju lagi. Tanpa mengorbit: arah pandang hanya berbelok pelan
+// (slerp, awal & akhir lembut) bila arah tujuan berbeda. Waktu memakai easeInOutSine; durasi mengikuti panjang jalur.
+const FOVH = 2 * Math.tan(THREE.MathUtils.degToRad(20));             // lebar pandang per meter jarak (FOV 40°)
+function flyPanZoom(t1, dist1, dir1, done, dur) {
   zoom.goal = null;
-  tween = { p0: camera.position.clone(), t0: controls.target.clone(), p1: pos.clone(), t1: target.clone(), start: performance.now(), dur, done };
+  const t0 = controls.target.clone(), v0 = t0.clone().sub(camera.position), d0 = Math.max(0.05, v0.length()), dir0 = v0.normalize();
+  const D1 = (dir1 ?? dir0).clone().normalize(), rho = 1.3, r2 = rho * rho, r4 = r2 * r2;
+  const w0 = d0 * FOVH, w1 = dist1 * FOVH, U = t0.distanceTo(t1);
+  let S, path;
+  if (U < 1e-3) {
+    const k = w1 < w0 ? -1 : 1; S = Math.abs(Math.log(w1 / w0)) / rho;
+    path = x => [0, w0 * Math.exp(k * rho * x)];
+  } else {
+    const b0 = (w1 * w1 - w0 * w0 + r4 * U * U) / (2 * w0 * r2 * U), b1 = (w1 * w1 - w0 * w0 - r4 * U * U) / (2 * w1 * r2 * U);
+    const q0 = Math.log(Math.sqrt(b0 * b0 + 1) - b0), q1 = Math.log(Math.sqrt(b1 * b1 + 1) - b1), ch = Math.cosh(q0), sh = Math.sinh(q0);
+    S = (q1 - q0) / rho;
+    path = x => [(w0 / r2) * (ch * Math.tanh(rho * x + q0) - sh), w0 * ch / Math.cosh(rho * x + q0)];
+  }
+  // Belok arah dibobot jarak kamera: lebih banyak berbelok saat jauh (tampak halus di layar), sedikit saat dekat
+  const turn = new THREE.Quaternion().setFromUnitVectors(dir0, D1), NL = 64, lut = [0];
+  for (let i = 1, wp = path(0)[1]; i <= NL; i++) { const w = path(i / NL * S)[1]; lut.push(lut[i - 1] + (w + wp) / 2); wp = w; }
+  for (let i = 0; i <= NL; i++) lut[i] /= lut[NL] || 1;
+  tween = { kind: 'pz', t0, t1: t1.clone(), U, S, path, dir0, turn, lut, p1: t1.clone().addScaledVector(D1, -dist1), start: performance.now(),
+            dur: dur ?? THREE.MathUtils.clamp(Math.max(S * 1000, THREE.MathUtils.radToDeg(dir0.angleTo(D1)) * 35), 2000, 3600), done };   // makin jauh / makin belok → makin lama
+}
+const panZoomTo = (P, done, dur) => { const v = P.t.clone().sub(P.p); flyPanZoom(P.t, v.length(), v, done, dur); };
+const easeIO = k => (k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2), easeSine = k => -(Math.cos(Math.PI * k) - 1) / 2;
+const _tv = new THREE.Vector3(), _dv = new THREE.Vector3(), _q = new THREE.Quaternion(), _q0 = new THREE.Quaternion();
+function stepTween(now) {
+  const T = tween, u = Math.min(1, (now - T.start) / T.dur);
+  if (T.kind === 'pz') {
+    const e = easeSine(u), [du, w] = T.path(e * T.S), k = T.U > 1e-3 ? du / T.U : 0;
+    _tv.lerpVectors(T.t0, T.t1, k);
+    const li = e * 64, i0 = Math.min(63, Math.floor(li)), kd = T.lut[i0] + (T.lut[i0 + 1] - T.lut[i0]) * (li - i0);   // belok arah
+    _dv.copy(T.dir0).applyQuaternion(_q.slerpQuaternions(_q0, T.turn, kd));
+    controls.target.copy(_tv); camera.position.copy(_tv).addScaledVector(_dv, -w / FOVH);
+  } else {
+    const k = easeIO(u);
+    camera.position.lerpVectors(T.p0, T.p1, k); controls.target.lerpVectors(T.t0, T.t1, k);
+  }
+  if (u >= 1) { camera.position.copy(T.p1); controls.target.copy(T.t1); }
+  camera.lookAt(controls.target);
+  if (u >= 1) { tween = null; T.done?.(); }
 }
 // flyTo untuk panel & pandangan: koordinat lokal stasiun aktif
 const toWorld = v => (model ? v.clone().applyMatrix4(model.matrixWorld) : v.clone());
@@ -335,7 +403,6 @@ $('xray').addEventListener('change', e => { xray = e.target.checked; applyXray()
 $('labels').addEventListener('change', e => { labelsOn = e.target.checked; });
 $('dims').addEventListener('change', e => { dimsOn = e.target.checked; applyDims(); });
 $('explode').addEventListener('input', e => { explodeT = +e.target.value; applyExplode(); });
-$('encY').addEventListener('input', e => { params.encY = +e.target.value; rebuild(); });
 
 // Pintu krangkeng & pintu box (keduanya engsel kanan). Pintu box dibatasi tabrakan dengan sisi kanan
 // dan pintu krangkeng (lidLimit); pintu krangkeng yang menutup akan mendorong pintu box.
@@ -383,13 +450,6 @@ renderer.domElement.addEventListener('dblclick', e => {
 setDoorUI();
 $('infoClose').addEventListener('click', () => { selected = null; refreshHighlight(); renderInfo(); });
 
-$('export').addEventListener('click', () => {
-  new GLTFExporter().parse(model, glb => {
-    const url = URL.createObjectURL(new Blob([glb], { type: 'model/gltf-binary' }));
-    const a = Object.assign(document.createElement('a'), { href: url, download: `${product.id}_monopole_${params.height}m_${INCH[params.od].replace('"', 'in')}.glb` });
-    a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }, err => alert('Gagal ekspor: ' + err), { binary: true, onlyVisible: true });
-});
 // Pintu model aktif mengikuti sudut pintu (dipanggil tiap frame & saat model ditinggalkan)
 function applyDoors() {
   const U = model.userData, rad = THREE.MathUtils.degToRad;
@@ -406,13 +466,25 @@ function applyDoors() {
   for (const l of U.latchLevers) l.rotation.y = lever;
 }
 
-// Geser pusat pandang ke kanan agar model / peta tidak tertutup panel di layar lebar
+// Pusat pandang di tengah ruang kosong antara panel kiri (daftar stasiun di peta / panel perangkat) dan panel kanan
+// (lingkungan + simulasi) yang sedang terbuka, agar model / peta tidak tertutup panel di layar lebar. Panel terlipat = tidak dihitung.
+const openW = el => (el && el.getClientRects().length && !el.classList.contains('folded') ? el.offsetWidth + 16 : 0);   // tampil & tidak dilipat
 function fitViewport() {
   camera.aspect = innerWidth / innerHeight;
-  if (innerWidth > 720) camera.setViewOffset(innerWidth, innerHeight, -153, 0, innerWidth, innerHeight);
+  const left = Math.max(openW(document.getElementById('panel')), openW(document.querySelector('.ov-rail'))), right = openW(document.getElementById('envHud'));   // yang tersembunyi = 0
+  if (innerWidth > 720) camera.setViewOffset(innerWidth, innerHeight, (right - left) / 2, 0, innerWidth, innerHeight);
   else camera.clearViewOffset();
   camera.updateProjectionMatrix();
   pipeline.setSize(innerWidth, innerHeight); labelRenderer.setSize(innerWidth, innerHeight);
+}
+// Panel perangkat (kiri) & daftar stasiun peta bisa dilipat ke judulnya saja → pandangan lebih luas (disimpan di browser)
+for (const [btn, host, key] of [['panelFold', '#panel', 'panelFolded'], ['railFold', '.ov-rail', 'railFolded']]) {
+  const b = $(btn), el = document.querySelector(host);
+  const set = on => { el.classList.toggle('folded', on); b.setAttribute('aria-expanded', !on); try { localStorage.setItem(key, on ? '1' : '0'); } catch { /* */ } fitViewport(); invalidate(); };
+  let saved = null; try { saved = localStorage.getItem(key); } catch { /* */ }
+  el.classList.toggle('folded', saved === '1'); b.setAttribute('aria-expanded', saved !== '1');
+  b.addEventListener('click', e => { e.preventDefault(); set(!el.classList.contains('folded')); });
+  el.querySelector('header, .ov-brand').addEventListener('click', e => { if (el.classList.contains('folded') && !e.target.closest('a, button')) set(false); });
 }
 pipeline.init();                                                  // kualitas optimal + pencahayaan sinematik referensi (tetap)
 addEventListener('resize', () => { fitViewport(); invalidate(); });
@@ -434,14 +506,8 @@ function updateLabels() {
 let lastT = null;
 function frame(now) {
   if (!world) return;
-  const dt = lastT === null ? 0 : Math.min(0.05, (now - lastT) / 1000); lastT = now;
-  if (tween) {
-    let k = Math.min(1, (now - tween.start) / tween.dur);
-    k = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
-    camera.position.lerpVectors(tween.p0, tween.p1, k);
-    controls.target.lerpVectors(tween.t0, tween.t1, k);
-    if (k >= 1) { const d = tween.done; tween = null; d?.(); }
-  }
+  const dt = lastT === null ? 0 : THREE.MathUtils.clamp((now - lastT) / 1000, 0, 0.05); lastT = Math.max(lastT ?? now, now);
+  if (tween) stepTween(now);
   stepZoom(now);
   let moving = false;
   if (mode === 'product' && model) {
@@ -463,17 +529,28 @@ function frame(now) {
   const p = camera.position, yG = world.heightAt(p.x, p.z) + (mode === 'map' ? 1 : 0.4);   // kamera tidak masuk ke dalam tanah
   if (p.y < yG) p.y = yG;
   camera.near = THREE.MathUtils.clamp(camera.position.distanceTo(controls.target) * 0.005, 0.02, 2); camera.updateProjectionMatrix();
+  // Lingkungan (env.js): jam hari → cahaya & langit; hujan → sungai, banjir, saluran sawah, V-Notch, tanah basah
+  const env = stepEnv(dt);
+  pipeline.setEnv(env.hour, env.cloud);
+  world.setEnv(env, pipeline.state, dt);
+  rain.update(dt, camera, controls.target, env.rainVis, pipeline.state.light);
+  applyWet(env.wet);
+  envPanel?.update();
   world.update(dt);                                               // arus sungai mengalir
   if (hoverEv) {
     const e = hoverEv; hoverEv = null;
-    if (mode === 'product') { const part = pick(e); if (part !== hovered) { hovered = part; refreshHighlight(); } }
+    if (mode === 'product') {
+      const part = pick(e); if (part !== hovered) { hovered = part; refreshHighlight(); }
+      if (!part) { const o = map.pickAt(e); renderer.domElement.style.cursor = o && o !== product?.id ? 'pointer' : ''; }   // stasiun lain bisa diklik
+    }
     else if (mode === 'map' && now - lastMapHover > 90) { lastMapHover = now; map.hover(map.pickAt(e)); }
   }
   // animasi simulasi seri (lampu, longsor, …) untuk semua stasiun di dunia; true = benda bergerak → bayangan ulang
   for (const E of Object.values(entries)) {
     if (!E.model) continue;
-    const upd = E.prod.update?.(now, { camera, controls });
+    const upd = E.prod.update?.(now, { camera, controls, env, sky: pipeline.state, model: E.model });
     if (upd === true || upd === 'shadow') moving = true;
+    if (E.prod.mapStatus) map?.setStatus(E.prod.id, E.prod.mapStatus());      // warna titik stasiun di peta
   }
   if (moving) pipeline.invalidateShadow();
   updateLabels();
@@ -482,7 +559,7 @@ function frame(now) {
   map?.update(now, innerWidth, innerHeight);
 }
 renderer.setAnimationLoop(frame);
-if (import.meta.env.DEV) window.__twin.step = frame;           // langkah manual saat panel pratinjau tidak menggambar
+if (import.meta.env.DEV) Object.assign(window.__twin, { step: frame, dbg: () => ({ mode, tween: tween && { kind: tween.kind, done: !!tween.done }, min: controls.minDistance }) });   // langkah manual & status (hanya npm run dev)
 
 // ---------- Mode (dipanggil dari app.js) ----------
 // Tinggalkan stasiun aktif: explode & pintu dikembalikan, label disembunyikan; stasiun di luar peta dilepas dari dunia.
@@ -493,28 +570,55 @@ function leaveProduct() {
   explodePh = { door: 0 }; if (model) applyDoors(); setDoorUI();
   selected = hovered = null; refreshHighlight(); renderInfo();
   hideLabelsOf(model); tagObjs = []; dimLabels = [];
-  if (!MAP_IDS.includes(entry.prod.id)) { scene.remove(entry.model); disposeModel(entry.model); delete entries[entry.prod.id]; }
+  if (!MAP_IDS.includes(entry.prod.id)) { scene.remove(entry.model); disposeModel(entry.model); delete entries[entry.prod.id]; wetMats = null; }
   entry = null; product = null; model = null;
 }
 // Peta selalu dibuka / dikembalikan ke pandangan default (Ikhtisar), termasuk saat keluar dari tampilan logger
 export function showMap() {
   if (mode === 'map') return;
+  if (mode === 'transit') {                                           // batal pindah perangkat: teruskan terbang ke Ikhtisar saja
+    transitTo = null; if (tween) tween.done = null;
+    mode = 'map'; document.body.classList.add('map-mode'); setLimits('map'); map.setShown(true); envPanel?.setDevice(null); fitViewport();
+    return;
+  }
   const fromProduct = mode === 'product';
   leaveProduct();
   mode = 'map'; document.body.classList.add('map-mode');
-  setLimits('map'); map.setShown(true);
+  setLimits('map'); map.setShown(true); envPanel?.setDevice(null); fitViewport();
   const P = map.viewPose('ikhtisar');
-  if (fromProduct) flyWorld(P.p, P.t, 1500); else { camera.position.copy(P.p); controls.target.copy(P.t); }
+  if (fromProduct) panZoomTo(P); else { camera.position.copy(P.p); controls.target.copy(P.t); }
 }
-export function mapFlyTo(name) { const P = map.viewPose(name); flyWorld(P.p, P.t, 1100); }
+export function mapFlyTo(name) {                                   // tombol pandangan peta: pan + zoom (lihat flyPanZoom)
+  panZoomTo(map.viewPose(name));
+}
 export function mapHover(id) { map?.hover(id); }
+// Pindah perangkat saat sedang di tampilan logger: kembali dulu ke Ikhtisar, baru terbang masuk ke perangkat baru
+// (mode 'transit' di antaranya: label & penanda peta disembunyikan; tujuan boleh diganti selama terbang)
+let transitTo = null;
+const STATION_VIEW = { 'ews-longsor': 'ews', 'awlr-sungai': 'awlr', vnotch: 'vnotch', 'ews-banjir': 'hulu', arr: 'arr' };   // pandangan tiba per stasiun (mapView)
+function transitUI(prod) {
+  envPanel?.setDevice(`${prod.code}${prod.variant ? ' ' + prod.variant : ''}`);
+  $('prodCode').textContent = prod.code;
+  $('prodName').textContent = [prod.name || 'Nama lengkap belum diisi', prod.variant].filter(Boolean).join(' · ');
+  $('prodPanel').innerHTML = `<p class="note" style="margin:0">Kembali ke ikhtisar, lalu menuju ${prod.code}${prod.variant ? ' ' + prod.variant : ''}…</p>`;
+}
 export function showProduct(prod) {
   if (mode === 'product' && product?.id === prod.id) return;
+  if (mode === 'transit') { transitTo = prod; transitUI(prod); return; }
+  if (mode === 'product') {
+    leaveProduct(); mode = 'transit'; transitTo = prod; transitUI(prod); setLimits('map');
+    panZoomTo(map.viewPose('ikhtisar'), () => { const next = transitTo; transitTo = null; if (next) enterProduct(next); });
+    return;
+  }
+  enterProduct(prod);
+}
+function enterProduct(prod) {
   leaveProduct();
   mode = 'product'; document.body.classList.remove('map-mode'); map.setShown(false);
   product = prod; entry = entries[prod.id] ??= newEntry(prod); params = entry.params;
   $('prodCode').textContent = prod.code;
   $('prodName').textContent = [prod.name || 'Nama lengkap belum diisi', prod.variant].filter(Boolean).join(' · ');
+  envPanel?.setDevice(`${prod.code}${prod.variant ? ' ' + prod.variant : ''}`);             // simulasi perangkat di panel kanan
   const el = $('prodPanel');
   el.innerHTML = '';
   if (prod.panel) prod.panel(el, { params, rebuild, invalidate, flyTo });
@@ -522,8 +626,14 @@ export function showProduct(prod) {
   buildSteps();
   if (!entry.model || encRange()) rebuild(); else { model = entry.model; adoptModel(); }
   fitViewport();
-  const [pos, tgt] = viewPose('iso');                          // terbang dari peta ke stasiun: scene tetap sama
-  flyWorld(toWorld(new THREE.Vector3(...pos)), toWorld(new THREE.Vector3(...tgt)), 1500, () => setLimits('product'));
+  // Dari peta ke stasiun: mendarat di pandangan stasiun pilihan user (tombol peta Tebing EWS / Sungai AWLR / Sawah V-Notch);
+  // stasiun tanpa pandangan peta → titik pandang Iso dengan arah pandang sekarang
+  const vName = STATION_VIEW[prod.id];
+  if (vName) panZoomTo(map.viewPose(vName), () => setLimits('product'));
+  else {
+    const [pos, tgt] = viewPose('iso'), tW = toWorld(new THREE.Vector3(...tgt));
+    flyPanZoom(tW, Math.max(toWorld(new THREE.Vector3(...pos)).distanceTo(tW) * 1.3, params.height * 2), null, () => setLimits('product'));
+  }
   if (camera.position.distanceTo(controls.target) < 45) setLimits('product');
 }
 // Bangun dunia + model lengkap stasiun peta, lalu mulai di mode peta
@@ -533,5 +643,7 @@ export function init({ products, mapIds, onOpen, onHover }) {
   const mapProds = products.filter(p => mapIds.includes(p.id));
   for (const p of mapProds) { const E = entries[p.id] = newEntry(p); E.model = makeModel(E); hideLabelsOf(E.model); }
   map = createMap({ scene, camera, renderer, labelHost: document.getElementById('ovLabels'), products: mapProds, onOpen, onHover });
+  envPanel = mountEnvPanel(document.getElementById('envHud'), { onFold: () => { fitViewport(); invalidate(); } });
+  fitViewport();
   mode = 'init'; showMap();
 }

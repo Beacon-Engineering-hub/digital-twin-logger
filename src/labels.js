@@ -22,7 +22,7 @@ export function tag(text, part, opts = {}) {
   return o;
 }
 
-export const dimMat = new THREE.LineBasicMaterial({ color: 0x1d5fd6, depthTest: false, transparent: true });
+export const dimMat = new THREE.LineBasicMaterial({ color: 0x3cb4f2, depthTest: false, transparent: true });
 export function dimension(a, b, tick, text, maxDist = 0) {
   const g = new THREE.Group(); g.userData.isDim = true;
   const A = new THREE.Vector3(...a), B = new THREE.Vector3(...b), T = new THREE.Vector3(...tick);

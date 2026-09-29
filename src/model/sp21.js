@@ -12,7 +12,8 @@ import { tag } from '../labels.js';
 export const CONDUIT_R = 0.008, CABLE_R = 0.0045, POLE_GAP = 0.063;   // POLE_GAP = jarak sumbu conduit dari sumbu tiang
 
 // part = nama komponen conduit + kabel (untuk info / sorot), default kabel panel surya
-export function sp21Cable(S, { slot = 0, wireToY, group, phi, yH, route = [], tail = null, endCable, tagText, tagAt, plugTag, part: cp = 'pvCable' }) {
+// gap = jarak sumbu conduit dari sumbu tiang di titik belok ke tiang (default POLE_GAP; lebih besar = conduit kedua di luar)
+export function sp21Cable(S, { slot = 0, wireToY, group, phi, yH, gap = POLE_GAP, route = [], tail = null, endCable, tagText, tagAt, plugTag, part: cp = 'pvCable' }) {
   const mm = v => v / 1000, rad = THREE.MathUtils.degToRad;
   const part = (geo, mat, name, x, y, z) => { const m = mesh(geo, mat, name); m.position.set(x, y, z); return m; };
   const cyl = (r0, r1, h, seg = 24) => new THREE.CylinderGeometry(r0, r1, h, seg);
@@ -52,7 +53,7 @@ export function sp21Cable(S, { slot = 0, wireToY, group, phi, yH, route = [], ta
   if (plugTag) { const o = tag(plugTag, 'sp21', { maxDist: 2.5 }); o.position.set(kx + 0.016, yS - 0.03, kzW); group.add(o); }
 
   // Jalur conduit
-  const pol = (deg, y) => [POLE_GAP * Math.cos(rad(deg)), y, POLE_GAP * Math.sin(rad(deg))];
+  const pol = (deg, y) => [gap * Math.cos(rad(deg)), y, gap * Math.sin(rad(deg))];
   const yPB = yS - 0.06, yc0 = yPB - 0.008;
   const path = roundedPath([[kx, yc0, kzW], [kx, yH, kzW], pol(phi, yH), ...route], 0.04);
   if (tail) path.add(new THREE.CatmullRomCurve3(tail.map(v => new THREE.Vector3(...v)), false, 'centripetal'));

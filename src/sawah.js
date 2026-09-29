@@ -17,6 +17,7 @@ import { foamTexture } from './river.js';
 // Kerangka (x, d): x = x dunia, d = jarak dari sumbu sungai ke arah seberang (z = zRiver(x) + d) → pematang memanjang
 // mengikuti kelokan sungai. Sungai sedikit miring (world.js): muka air saluran < sungai di pintu pengambilan, muka air
 // limpasan > sungai di muara pembuang → air mengalir secara gravitasi.
+// Air saluran, kolam V-Notch, pancaran lewat takik & terjunan muara naik-turun mengikuti simulasi lingkungan (env.js → setWater).
 // ============================================================================================================
 const smooth = THREE.MathUtils.smoothstep, lerp = THREE.MathUtils.lerp, clamp = THREE.MathUtils.clamp;
 
@@ -254,21 +255,23 @@ export function makeSawah({ zRiver, halfW, riverAt }) {
     box(M.conc, CW + 2 * TH, 0.66, 0.2, E.X + E.sz * 0.1, E.w - 0.03, E.Z - E.sx * 0.1, Math.atan2(-E.sz, E.sx));
     const wnC = waterNormalTexture(1, 1);
     const cwMat = new THREE.MeshStandardMaterial({ color: 0x55645a, normalMap: wnC, normalScale: new THREE.Vector2(0.28, 0.28), roughness: 0.1, metalness: 0.05, envMapIntensity: 0.8 });
-    root.add(ribbon(S, [[-a, -0.02], [a, -0.02]], cwMat, [1 / CW, 1 / 3]));
+    const canalW = [ribbon(S, [[-a, -0.02], [a, -0.02]], cwMat, [1 / CW, 1 / 3])];      // air saluran primer (+ bukaan pintu sadap)
     for (const O of openings) {
       const smp = [sAt(O.s - O.h), sAt(O.s), sAt(O.s + O.h)];
-      root.add(ribbon(smp, [[a - 0.02, -0.025], [a + TH + 0.03, -0.025]], cwMat, [1, 1]));
+      canalW.push(ribbon(smp, [[a - 0.02, -0.025], [a + TH + 0.03, -0.025]], cwMat, [1, 1]));
     }
-    flows.push({ tex: wnC, v: 0.14 });
+    root.add(...canalW);
+    flows.push({ tex: wnC, v: 0.14, g: 'canal' });
     const foam = foamTexture(rng(77)); foam.repeat.set(1, 2);                        // buih di hilir pintu
     const fm = new THREE.Mesh(new THREE.PlaneGeometry(CW, 3).rotateX(-Math.PI / 2), new THREE.MeshStandardMaterial({ color: 0xffffff, map: foam, transparent: true, opacity: 0.5, depthWrite: false, roughness: 0.9 }));
-    fm.position.set(gx, W0 - 0.008, gz + 2); fm.renderOrder = 2; root.add(fm); flows.push({ tex: foam, v: -0.35 });
+    fm.position.set(gx, W0 - 0.008, gz + 2); fm.renderOrder = 2; root.add(fm); flows.push({ tex: foam, v: -0.35, g: 'canal' });
     const wnB = waterNormalTexture(6, 1.7);                                            // air sungai di kolam depan pintu
     const bay = new THREE.Mesh(new THREE.PlaneGeometry(10, DG - 0.45 - (halfW(XA) - 0.8)).rotateX(-Math.PI / 2),
       new THREE.MeshStandardMaterial({ color: 0x5a5840, normalMap: wnB, normalScale: new THREE.Vector2(0.2, 0.2), roughness: 0.12, metalness: 0.05, envMapIntensity: 0.75,
         transparent: true, opacity: 0.96, polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 2 }));
     bay.position.set(gx, RL, zRiver(XA) + (DG - 0.45 + halfW(XA) - 0.8) / 2); bay.receiveShadow = true; root.add(bay);
-    flows.push({ tex: wnB, v: 0.03 });
+    flows.push({ tex: wnB, v: 0.03, g: 'river' });
+    const dyn = { canalW, fm, bay };                                                  // bagian air yang naik-turun (setWater)
 
     // ---------- Pintu sadap + saluran tersier ke petak terdekat ----------
     function offtake(x0, z0, x1, z1, water, gnd) {
@@ -347,7 +350,7 @@ export function makeSawah({ zRiver, halfW, riverAt }) {
       wS.push(run(PP0, PW0, [[-VN.half, -0.02], [VN.half, -0.02]], 1, PWV));
       const nD = Math.max(2, Math.ceil((PE - PP1) / 1.5));
       cgS.push(run(PP1, PE, U(TWH, TWT, 0.18, -0.2, -0.75), nD));                 // saluran pembuang ke sungai (dinding tertanam dalam)
-      wS.push(run(PP1, PE, [[-TWH, -0.02], [TWH, -0.02]], nD));
+      const wDown = run(PP1, PE, [[-TWH, -0.02], [TWH, -0.02]], nD);
       const at3 = (p, lx) => { const P = pos(p); return [P.X + AX * lx, P.Z + AZ * lx]; };
       const onP = (mat, w, h, dp, p, lx, y) => { const [x, z] = at3(p, lx); box(mat, w, h, dp, x, y, z, ry); };
       const wIn = VN.half + VN.wall - TWH;
@@ -356,7 +359,9 @@ export function makeSawah({ zRiver, halfW, riverAt }) {
       for (const sd of [-1, 1]) onP(M.conc, TWT, 0.93, 0.03, PE - 0.015, sd * (TWH + TWT / 2), wE + 0.18 - 0.465);
       onP(M.conc, 2 * TWH, 0.55, 0.03, PE - 0.015, 0, wE - 0.2 - 0.275);          // tembok muara di bawah lantai
       const canalS = new THREE.Mesh(mergeGeometries(cgS), M.conc); canalS.castShadow = canalS.receiveShadow = true; root.add(canalS);
-      const waterS = new THREE.Mesh(mergeGeometries(wS), cwMat); waterS.receiveShadow = true; root.add(waterS);
+      const waterS = new THREE.Mesh(mergeGeometries(wS), cwMat); waterS.receiveShadow = true; root.add(waterS);   // pengarah + kolam: ikut tinggi air di takik
+      const waterD = new THREE.Mesh(wDown, cwMat); waterD.receiveShadow = true; root.add(waterD);             // pembuang di hilir pelat
+      Object.assign(dyn, { waterS, waterD });
       // Dinding beton bertakik V 90° (dasar takik NY) menutup ujung hilir kolam selebar kolam (sesuai foto pemasangan)
       const PP = onLine(PP1), hw = VN.half + VN.wall, yb = NY - 0.3 - 0.1, yt = VN.top, c = yt - NY, vs = new THREE.Shape();
       vs.moveTo(-hw, 0); vs.lineTo(hw, 0); vs.lineTo(hw, yt - yb); vs.lineTo(c, yt - yb); vs.lineTo(0, NY - yb); vs.lineTo(-c, yt - yb); vs.lineTo(-hw, yt - yb); vs.closePath();
@@ -365,33 +370,37 @@ export function makeSawah({ zRiver, halfW, riverAt }) {
       // Pancaran air lewat takik (terjunan bebas) + buih di kaki terjunan
       const sheetGeo = (pts, idx) => { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3)); g.setIndex(idx); g.computeVertexNormals(); return g; };
       const toW = (lx, y, lz, P) => [P.X + AX * lx + UX * lz, y, P.Z + AZ * lx + UZ * lz];
-      {
-        const np = [], ni = [], N = 12, fall = NY - DW0 + 0.05;
+      // Pancaran lewat takik: lebar & tebal mengikuti tinggi air di atas dasar takik H (V 90° → setengah lebar = H)
+      const nappeGeo = (H, dd) => {
+        const np = [], ni = [], N = 12, fall = NY - (DW0 + dd) + 0.05;
         for (let i = 0; i <= N; i++) {
-          const t = i / N, lz = -0.15 + 0.37 * t, k = Math.max(0, lz / 0.22), dy = -fall * k * k, hwN = VH * (1 - 0.35 * k), dep = VH * 0.85 * (1 - 0.3 * k);   // lewat takik lalu jatuh
+          const t = i / N, lz = -0.15 + 0.37 * t, k = Math.max(0, lz / 0.22), dy = -fall * k * k, hwN = H * (1 - 0.35 * k), dep = H * 0.85 * (1 - 0.3 * k);   // lewat takik lalu jatuh
           for (const [x, y] of [[-hwN, NY + dep], [0, NY], [hwN, NY + dep]]) np.push(...toW(x, y + dy, lz, PP));
           if (i) { const b = (i - 1) * 3; ni.push(b, b + 3, b + 1, b + 1, b + 3, b + 4, b + 1, b + 4, b + 2, b + 2, b + 4, b + 5); }
         }
-        const m = new THREE.Mesh(sheetGeo(np, ni), nappeMat); m.renderOrder = 2; root.add(m);
-      }
+        return sheetGeo(np, ni);
+      };
+      const nappe = new THREE.Mesh(nappeGeo(VH, 0), nappeMat); nappe.renderOrder = 2; root.add(nappe);
       const foamMat = o => new THREE.MeshStandardMaterial({ color: 0xffffff, map: o, transparent: true, opacity: 0.6, depthWrite: false, roughness: 0.9 });
       const ft = foam.clone(); ft.repeat.set(0.5, 1);
       const splash = new THREE.Mesh(new THREE.PlaneGeometry(2 * TWH, 0.9).rotateX(-Math.PI / 2).rotateY(ry), foamMat(ft));
-      const SP0 = onLine(PP1 + 0.5); splash.position.set(SP0.X, DW0 + 0.004, SP0.Z); splash.renderOrder = 2; root.add(splash); flows.push({ tex: ft, v: -0.5 });
-      // Terjunan di muara pembuang ke sungai + buih di permukaan sungai
+      const SP0 = onLine(PP1 + 0.5); splash.position.set(SP0.X, DW0 + 0.004, SP0.Z); splash.renderOrder = 2; root.add(splash); flows.push({ tex: ft, v: -0.5, g: 'spill' });
+      // Terjunan di muara pembuang ke sungai + buih di permukaan sungai (hilang bila muara terendam sungai)
       const PM = onLine(PE), rv = riverAt(PM.X);
-      {
-        const np = [], ni = [], N = 8, fall = wE - rv + 0.02;
+      const outletGeo = (w, r, k) => {
+        const np = [], ni = [], N = 8, fall = w - r + 0.02;
         for (let i = 0; i <= N; i++) {
-          const t = i / N, lz = 0.02 + 0.32 * t, y = wE - 0.01 - fall * t * t;
+          const t = i / N, lz = 0.02 + (0.12 + 0.2 * k) * t, y = w - 0.01 - fall * t * t;
           for (const x of [-TWH + 0.02, TWH - 0.02]) np.push(...toW(x * (1 + 0.3 * t), y, lz, PM));
           if (i) { const b = (i - 1) * 2; ni.push(b, b + 2, b + 1, b + 1, b + 2, b + 3); }
         }
-        const m = new THREE.Mesh(sheetGeo(np, ni), nappeMat); m.renderOrder = 3; root.add(m);
-      }
+        return sheetGeo(np, ni);
+      };
+      const outlet = new THREE.Mesh(outletGeo(wE, rv, 1), nappeMat); outlet.renderOrder = 3; root.add(outlet);
       const ft2 = foam.clone(); ft2.repeat.set(1, 1);
       const pool2 = new THREE.Mesh(new THREE.PlaneGeometry(1.3, 1.3).rotateX(-Math.PI / 2), foamMat(ft2));
-      const LP = toW(0, 0, 0.5, PM); pool2.position.set(LP[0], rv + 0.015, LP[2]); pool2.renderOrder = 3; root.add(pool2); flows.push({ tex: ft2, v: 0.25 });
+      const LP = toW(0, 0, 0.5, PM); pool2.position.set(LP[0], rv + 0.015, LP[2]); pool2.renderOrder = 3; root.add(pool2); flows.push({ tex: ft2, v: 0.25, g: 'spill' });
+      Object.assign(dyn, { nappe, nappeGeo, splash, outlet, outletGeo, pool2, wE, rv, xOut: PM.X, SP0y: DW0 + 0.004 });
     }
 
     // ---------- Petak: air, bibit, tajuk padi, lumpur bera ----------
@@ -503,9 +512,38 @@ export function makeSawah({ zRiver, halfW, riverAt }) {
     });
     bund.receiveShadow = true; root.add(bund);
 
-    for (const [mat, gs] of lists) { const m = new THREE.Mesh(mergeGeometries(gs), mat); m.castShadow = m.receiveShadow = true; root.add(m); }
-    return { group: root, flows };
+    for (const [mat, gs] of lists) {
+      const m = new THREE.Mesh(mergeGeometries(gs), mat); m.castShadow = m.receiveShadow = true; root.add(m);
+      if (mat === cwMat) { m.castShadow = false; dyn.cwMerged = m; }             // air saluran tersier & pintu sadap
+    }
+
+    // ---------- Air yang naik-turun (env.js): sungai (dh), saluran dari pintu pengambilan (canal), V-Notch (H, Q) ----------
+    // Air yang turun di bawah lantai saluran tertutup lantai beton → saluran tampak kering dengan sendirinya.
+    const fmY = fm.position.y, st = { H: VH, dd: 0, out: '' };
+    // dhAt(x) = muka air sungai (m dari normal) di x dunia
+    function setWater({ canal, qLag, H, Q }, Q0, dhAt) {
+      for (const m of dyn.canalW) m.position.y = Math.max(-0.52, canal);
+      if (dyn.cwMerged) dyn.cwMerged.position.y = Math.max(-0.25, canal * 0.5);
+      fm.position.y = fmY + Math.max(-0.52, canal); fm.material.opacity = 0.5 * clamp(qLag, 0, 1.3); fm.visible = qLag > 0.03;
+      bay.position.y = RL + dhAt(XA);
+      dyn.waterS.position.y = Math.max(-0.1, H - VH);                               // pengarah + kolam penenang: NY + H
+      const ratio = Q / Q0, dd = clamp(0.08 * (Math.sqrt(ratio) - 1), -0.12, 0.15);
+      dyn.waterD.position.y = dd;
+      if (Math.abs(H - st.H) > 0.0015 || Math.abs(dd - st.dd) > 0.004) {
+        st.H = H; st.dd = dd;
+        dyn.nappe.geometry.dispose(); dyn.nappe.geometry = dyn.nappeGeo(Math.max(0.004, H), dd);
+      }
+      dyn.nappe.visible = H > 0.004;
+      dyn.splash.position.y = dyn.SP0y + dd; dyn.splash.material.opacity = 0.6 * clamp(H / VH, 0, 1.4); dyn.splash.visible = H > 0.004;
+      const w = dyn.wE + dd, r = dyn.rv + dhAt(dyn.xOut), k = clamp(Math.sqrt(ratio), 0.2, 1.8), key = `${w.toFixed(3)}|${r.toFixed(3)}|${k.toFixed(2)}`;
+      if (key !== st.out && w - r > 0.03) { st.out = key; dyn.outlet.geometry.dispose(); dyn.outlet.geometry = dyn.outletGeo(w, r, k); }
+      dyn.outlet.visible = w - r > 0.03 && Q > 1e-4;                               // muara terendam sungai → tanpa terjunan
+      dyn.pool2.position.y = r + 0.015; dyn.pool2.material.opacity = 0.6 * clamp(ratio, 0, 1.5) * (dyn.outlet.visible ? 1 : 0.3);
+    }
+    return { group: root, flows, setWater };
   }
 
-  return { carve, dist, inPlot, edge, vnotchSpot, VN, labels, build };
+  // Ujung saluran primer / pangkal saluran tersier (pintu sadap di x = XV, tembok ujung di XT); dOuter = muka luar dinding saluran
+  const tertiaryHead = { x: XV, xEnd: XT, d: DB, dOuter: DB + CW / 2 + TH };
+  return { carve, dist, inPlot, edge, vnotchSpot, VN, labels, build, intakeX: XA, tertiaryHead };
 }

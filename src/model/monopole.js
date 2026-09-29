@@ -312,10 +312,6 @@ export function buildMonopole(p, opts = {}) {
         enc.add(P(new THREE.TorusGeometry(mm(3.6), mm(0.7), 6, 16).rotateX(Math.PI / 2), MAT.blackMt(), 'antenna', ax, 58 + i * 3, AZ));
     }
     enc.add(P(new THREE.CylinderGeometry(mm(5.5), mm(7), mm(170), 16), MAT.blackMt(), 'antenna', 183, 80, 40));   // antena stik
-    for (const [ry, rz, dy] of [[0.2, 0.3, 0], [-0.4, 0.1, 6], [0.6, -0.2, 11]]) {                               // gulungan kabel antena
-      const coil = P(new THREE.TorusGeometry(mm(34), mm(1.8), 6, 40), MAT.blackMt(), 'antenna', 150, 222 + dy, 45);
-      coil.rotation.set(Math.PI / 2 - 0.25, ry, rz); enc.add(coil);
-    }
     itag('Antena', 'antenna', 185, 20, 45);
 
     // 3. MPPT 140 × 85 × 45 mm: flange, bagian layar (tebal) + bagian terminal (lebih rendah)

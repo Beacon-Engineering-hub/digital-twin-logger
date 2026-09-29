@@ -1,40 +1,29 @@
 import * as THREE from 'three';
-import { CAGE, F_ABOVE } from '../config.js';
+import { F_ABOVE } from '../config.js';
 import { MAT } from '../materials.js';
-import { mesh, rodBetween, roundedPath } from '../geometry.js';
+import { mesh } from '../geometry.js';
 import { dimension, tag } from '../labels.js';
 import { LAYER } from '../render.js';
 import { CABLE_R, sp21Cable } from '../model/sp21.js';
 import { CLIFF, SLIDE, buildTerrain, groundY, surfacePoint, zCrest } from './ewsCliff.js';
 import { EWS_SENSORS } from '../world.js';
+import { ENV, SOIL_CRIT } from '../env.js';
+import { ALARM_STEP, alarmEncYMax, alarmExplode, alarmParts, buildAlarm, driveAlarm, pol } from './ewsAlarm.js';
 
 // EWS Longsor (satuan m). Permintaan user: stasiun monopole di atas tebing, di tiang ditambah horn dan standing light;
 // 5 tiltmeter 3 axis (bentuk kotak) di titik rawan longsor pada lereng, masing-masing di atas plinth beton yang muka
 // atasnya datar (cukup untuk sensor saja); ada simulasi longsor.
-// Horn & standing light dipasang di satu bracket (plat + 2 U-bolt + lengan hollow 40×40) di antara antipanjat dan
-// bracket panel surya: standing light berdiri di ujung kiri, horn di ujung kanan menghadap ke lembah (+Z).
+// Horn & standing light (bracket, lampu, horn, kabel & animasinya) = ewsAlarm.js, dipakai juga EWS Banjir; di sini horn
+// menghadap ke lembah (+Z).
 // Tiltmeter = slave, dirangkai seri (daisy chain): logger (master) → SP21 di box → T1 → T2 → T3 → T4 → T5.
 // Tiap slave punya 2 cable gland (IN di sisi −x, OUT di sisi +x); T5 ujung rantai (hanya IN).
 // Horn & standing light masing-masing punya kabel + conduit sendiri ke konektor SP21 di box.
 // Semua ukuran, jalur kabel, bracket, horn, lampu, tiltmeter, plinth, tebing & ambang = perkiraan; protokol bus belum dikonfirmasi.
-export const BRACKET = {
-  drop: 0.64,                                   // sumbu lengan di bawah ujung tiang
-  plateW: 0.14, plateH: 0.2, plateT: 0.006,     // plat dudukan di muka depan tiang
-  ubDY: 0.07, ubR: 0.005,                       // 2 U-bolt M10, ± 70 mm dari sumbu lengan
-  half: 0.6, size: 0.04, wall: 0.002,           // lengan hollow 40×40×2, 600 mm ke kiri & kanan
-};
-export const HORN = { x: 0.5, axisUp: 0.15, mouthR: 0.12, bellL: 0.26, throatR: 0.035, driverR: 0.055, driverL: 0.1, tilt: 10 };
-export const LIGHT = { x: -0.56, R: 0.03, baseH: 0.045, tierH: 0.055, capH: 0.022, ring: 0.004 };
 export const TILT = { w: 0.16, d: 0.12, h: 0.075 };                 // badan tiltmeter
 export const PLINTH = { w: 0.24, d: 0.2, above: 0.05, embed: 0.3 };  // muka atas datar; tertanam di bawah titik lereng terendah
 export const LIMIT = { waspada: 1, awas: 3 };                        // ambang kemiringan total (°)
 // 5 titik rawan (world.js): x, u = jarak mendatar dari tepi tebing (lereng tanah ± 38°). zone = massa tanah yang ikut longsor.
 export const SITES = EWS_SENSORS;
-const TIERS = [                                        // bawah → atas
-  { name: 'Hijau', on: 0x35e06a, off: 0x1f6b3a },
-  { name: 'Kuning', on: 0xffb81f, off: 0x8a6414 },
-  { name: 'Merah', on: 0xff3b30, off: 0x86201c },
-];
 const STATUS = {
   off:     { label: 'Mati',    tier: -1 },
   aman:    { label: 'Aman',    tier: 0 },
@@ -47,7 +36,21 @@ const levelOf = deg => deg >= LIMIT.awas ? 'awas' : deg >= LIMIT.waspada ? 'wasp
 const SIM_MS = 18000;
 const slideA = tau => tau < 0.5 ? 0.07 * (tau / 0.5) ** 2 : 0.07 + 0.93 * (1 - (1 - (tau - 0.5) / 0.5) ** 3);
 let status = 'aman', cur = null, lastKey = '', ui = null;
-const sim = { site: 2, tau: 0, tau0: 0, t0: 0, running: false, auto: true };   // site = indeks titik awal, −1 = semua titik
+const sim = { site: 2, tau: 0, tau0: 0, t0: 0, running: false, auto: true,     // site = indeks titik awal, −1 = semua titik
+  rain: true, creep: 0, byRain: false };                                        // pemicu hujan: rayapan dari kejenuhan tanah (env.js)
+// Pemicu hujan: bila kejenuhan tanah ≥ SOIL_CRIT, lereng merayap (tau 0 → 0,5) dalam waktu SIMULASI, makin cepat makin jenuh
+// (± 1–4 jam simulasi); sampai 0,5 lereng runtuh (tau 0,5 → 1) dalam waktu nyata seperti tombol Mulai longsor. Laju = perkiraan.
+const CREEP = { min: 0.08, max: 0.6 };                                          // tau per jam simulasi di ambang / jenuh penuh
+function rainCreep(now) {
+  if (!sim.rain || sim.running || sim.tau >= 0.5 || ENV.W < SOIL_CRIT || !(ENV.dtSim > 0)) return false;
+  if (Math.abs(sim.creep - sim.tau) > 0.003) sim.creep = sim.tau;               // tau diubah user (reset, geser, titik lain)
+  sim.creep = Math.min(0.5, sim.creep + ENV.dtSim * (CREEP.min + (CREEP.max - CREEP.min) * (ENV.W - SOIL_CRIT) / (1 - SOIL_CRIT)));
+  const t = sim.creep >= 0.5 ? 0.5 : Math.floor(sim.creep / 0.0025) * 0.0025;  // bertingkat: medan dihitung ulang tiap 0,25 %
+  if (t === sim.tau) return false;
+  Object.assign(sim, { tau: t, auto: true, byRain: true });
+  if (t >= 0.5) Object.assign(sim, { tau0: 0.5, t0: now, running: true });       // lereng runtuh
+  return true;
+}
 // Longsor merambat: titik awal bergerak penuh; titik tetangga menyusul dengan jeda & besar makin kecil menurut jarak urutan.
 // Pilihan "semua titik" = longsor besar satu lereng (semua titik penuh, jeda kecil berurutan dari tengah).
 const SPREAD = { delay: 0.1, fall: 0.22, min: 0.3 };
@@ -59,133 +62,11 @@ function zoneAmounts(tau) {
   });
 }
 
-const armY = d => d.yTop - BRACKET.drop;
-
-// Tekstur halo lampu (gradasi radial putih → transparan)
-let haloTex = null;
-function halo() {
-  if (!haloTex) {
-    const cv = Object.assign(document.createElement('canvas'), { width: 64, height: 64 }), x = cv.getContext('2d');
-    const gr = x.createRadialGradient(32, 32, 0, 32, 32, 32);
-    gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.25, 'rgba(255,255,255,0.55)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
-    x.fillStyle = gr; x.fillRect(0, 0, 64, 64);
-    haloTex = new THREE.CanvasTexture(cv); haloTex.colorSpace = THREE.SRGBColorSpace;
-  }
-  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: haloTex, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true }));
-  s.layers.set(LAYER.NO_AO); s.visible = false;
-  return s;
-}
-
 function extend(model) {
-  const d = model.userData.d, ro = model.userData.station.ro, B = BRACKET;
+  const d = model.userData.d, S = model.userData.station;
   const at = (m, x, y, z) => { m.position.set(x, y, z); return m; };
-  const yA = armY(d), zP = ro + B.plateT, zA = zP + B.size / 2, yTopArm = yA + B.size / 2;
   const root = new THREE.Group(); root.name = 'ews'; model.add(root);
-  const U = {};
-  const blue = MAT.paint();
-
-  // ---------- Bracket: plat dudukan + lengan hollow (dilas), 2 U-bolt melingkar di belakang tiang ----------
-  const asm = U.asm = new THREE.Group(), ub = U.ubolt = new THREE.Group(), nuts = U.nuts = new THREE.Group();
-  root.add(asm, ub, nuts);
-  const plate = new THREE.Shape(), uR = ro + B.ubR;
-  plate.moveTo(-B.plateW / 2, -B.plateH / 2); plate.lineTo(B.plateW / 2, -B.plateH / 2); plate.lineTo(B.plateW / 2, B.plateH / 2); plate.lineTo(-B.plateW / 2, B.plateH / 2); plate.closePath();
-  for (const dy of [-B.ubDY, B.ubDY]) for (const sx of [-1, 1]) { const h = new THREE.Path(); h.absarc(sx * uR, dy, 0.0055, 0, Math.PI * 2, true); plate.holes.push(h); }
-  asm.add(at(mesh(new THREE.ExtrudeGeometry(plate, { depth: B.plateT, bevelEnabled: false, curveSegments: 16 }), blue, 'ewsBracket'), 0, yA, ro));
-  const sq = new THREE.Shape(), s2 = B.size / 2, i2 = s2 - B.wall;
-  sq.moveTo(-s2, -s2); sq.lineTo(s2, -s2); sq.lineTo(s2, s2); sq.lineTo(-s2, s2); sq.closePath();
-  const sqH = new THREE.Path(); sqH.moveTo(-i2, -i2); sqH.lineTo(-i2, i2); sqH.lineTo(i2, i2); sqH.lineTo(i2, -i2); sqH.closePath(); sq.holes.push(sqH);
-  const armGeo = new THREE.ExtrudeGeometry(sq, { depth: 2 * B.half, bevelEnabled: false }).translate(0, 0, -B.half).rotateY(Math.PI / 2);
-  asm.add(at(mesh(armGeo, blue, 'ewsBracket'), 0, yA, zA));
-  const uNut = new THREE.CylinderGeometry(0.0098, 0.0098, 0.008, 6).rotateX(Math.PI / 2);
-  for (const dy of [-B.ubDY, B.ubDY]) {
-    const y = yA + dy, arc = mesh(new THREE.TorusGeometry(uR, B.ubR, 8, 40, Math.PI), MAT.bolt(), 'ewsBracket');
-    arc.rotation.x = Math.PI / 2; arc.rotation.z = Math.PI; arc.position.y = y; ub.add(arc);   // busur di belakang tiang
-    for (const sx of [-1, 1]) {
-      ub.add(rodBetween([sx * uR, y, 0], [sx * uR, y, zP + 0.016], B.ubR, MAT.bolt(), 'ewsBracket'));
-      nuts.add(at(mesh(uNut, MAT.nut(), 'ewsBracket'), sx * uR, y, zP + 0.004));
-    }
-  }
-  const brTag = tag('Bracket horn + lampu', 'ewsBracket', { maxDist: 4 }); brTag.position.set(0.18, yA - 0.03, zA + 0.03); asm.add(brTag);
-
-  // ---------- Standing light: tower light 3 susun (hijau – kuning – merah) berdiri di ujung kiri lengan ----------
-  const L = LIGHT, lg = new THREE.Group(); lg.position.set(L.x, yTopArm, zA); asm.add(lg);
-  const grey = new THREE.MeshStandardMaterial({ color: 0x5a5f66, roughness: 0.5 });
-  lg.add(at(mesh(new THREE.CylinderGeometry(L.R + 0.006, L.R + 0.006, 0.006, 32), grey, 'ewsLight'), 0, 0.003, 0),   // flens dudukan
-         at(mesh(new THREE.CylinderGeometry(L.R, L.R, L.baseH, 32), MAT.plastic(), 'ewsLight'), 0, 0.006 + L.baseH / 2, 0));
-  lg.add(at(mesh(new THREE.CylinderGeometry(0.0065, 0.0075, 0.012, 16).rotateZ(-Math.PI / 2), MAT.plastic(), 'ewsLight'), L.R + 0.005, 0.026, 0));   // cable gland
-  U.tiers = [];
-  let y = 0.006 + L.baseH;
-  for (const T of TIERS) {
-    lg.add(at(mesh(new THREE.CylinderGeometry(L.R + 0.0005, L.R + 0.0005, L.ring, 32), grey, 'ewsLight'), 0, y + L.ring / 2, 0));
-    y += L.ring;
-    const mat = new THREE.MeshStandardMaterial({ color: T.off, roughness: 0.22, metalness: 0 });
-    lg.add(at(mesh(new THREE.CylinderGeometry(L.R, L.R, L.tierH, 32), mat, 'ewsLight'), 0, y + L.tierH / 2, 0));
-    U.tiers.push({ mat, y: y + L.tierH / 2, T, lit: false });
-    y += L.tierH;
-  }
-  lg.add(at(mesh(new THREE.CylinderGeometry(L.R + 0.0005, L.R + 0.0005, L.ring, 32), grey, 'ewsLight'), 0, y + L.ring / 2, 0));
-  y += L.ring;
-  const capG = new THREE.SphereGeometry(L.R, 32, 8, 0, Math.PI * 2, 0, Math.PI / 2); capG.scale(1, L.capH / L.R, 1);
-  lg.add(at(mesh(capG, grey, 'ewsLight'), 0, y, 0));
-  U.halo = halo(); lg.add(U.halo);
-  const ltTag = tag('Standing light', 'ewsLight'); ltTag.position.set(L.R + 0.01, y - 0.05, 0); lg.add(ltTag);
-
-  // ---------- Horn speaker di ujung kanan: dudukan U di atas lengan, horn menghadap depan, miring turun ----------
-  const H = HORN, hx = H.x, hy = yTopArm + H.axisUp, horn = new THREE.Group();
-  horn.position.set(hx, hy, zA); horn.rotation.x = THREE.MathUtils.degToRad(H.tilt); asm.add(horn);
-  const hornMat = new THREE.MeshStandardMaterial({ color: 0xdcdad2, roughness: 0.45, side: THREE.DoubleSide });
-  const zB0 = H.driverL / 2 + 0.02, k = Math.log(H.mouthR / H.throatR) / H.bellL, pts = [];
-  for (let i = 0; i <= 24; i++) { const s = i / 24 * H.bellL; pts.push(new THREE.Vector2(H.throatR * Math.exp(k * s), s)); }
-  for (let i = 24; i >= 0; i--) { const s = i / 24 * H.bellL; pts.push(new THREE.Vector2(H.throatR * Math.exp(k * s) - 0.003, s)); }
-  const bell = new THREE.LatheGeometry(pts, 48).rotateX(Math.PI / 2).translate(0, 0, zB0);
-  const lip = new THREE.TorusGeometry(H.mouthR - 0.0015, 0.004, 8, 48).translate(0, 0, zB0 + H.bellL);
-  horn.add(
-    mesh(bell, hornMat, 'ewsHorn'), mesh(lip, hornMat, 'ewsHorn'),
-    mesh(new THREE.CylinderGeometry(H.throatR + 0.004, H.throatR + 0.004, 0.02, 32).rotateX(Math.PI / 2).translate(0, 0, zB0 - 0.01), hornMat, 'ewsHorn'),   // leher
-    mesh(new THREE.CylinderGeometry(H.driverR, H.driverR, H.driverL, 40).rotateX(Math.PI / 2), hornMat, 'ewsHorn'),                                  // unit driver
-    mesh(new THREE.SphereGeometry(H.driverR, 40, 8, 0, Math.PI * 2, 0, Math.PI / 2).scale(1, 0.35, 1).rotateX(-Math.PI / 2).translate(0, 0, -H.driverL / 2), hornMat, 'ewsHorn'),
-    at(mesh(new THREE.CylinderGeometry(0.0065, 0.0075, 0.014, 16).rotateX(Math.PI / 2), MAT.plastic(), 'ewsHorn'), 0, -0.02, -H.driverL / 2 - 0.021),   // cable gland
-  );
-  const hornGland = new THREE.Object3D(); hornGland.position.set(0, -0.02, -H.driverL / 2 - 0.029); horn.add(hornGland);
-  // Dudukan U: plat dasar dibaut ke atas lengan, 2 kaki tegak ke baut pivot di sisi driver
-  const hb = new THREE.Group(); hb.position.set(hx, yTopArm, zA); asm.add(hb);
-  const legX = H.driverR + 0.008, legH = H.axisUp;
-  hb.add(at(mesh(new THREE.BoxGeometry(2 * legX + 0.006, 0.004, B.size), MAT.galv(), 'ewsHorn'), 0, 0.002, 0));
-  for (const sx of [-1, 1]) {
-    hb.add(at(mesh(new THREE.BoxGeometry(0.004, legH + 0.012, 0.026), MAT.galv(), 'ewsHorn'), sx * legX, legH / 2 + 0.002, 0),
-           at(mesh(new THREE.CylinderGeometry(0.009, 0.009, 0.006, 6).rotateZ(Math.PI / 2), MAT.nut(), 'ewsHorn'), sx * (legX + 0.005), legH, 0));   // baut pivot
-    hb.add(at(mesh(new THREE.CylinderGeometry(0.0065, 0.0065, 0.005, 6), MAT.nut(), 'ewsHorn'), sx * 0.03, 0.0065, 0));                         // baut ke lengan
-  }
-  // Gelombang suara (visual saat status Awas)
-  U.waves = [];
-  for (let i = 0; i < 3; i++) {
-    const w = new THREE.Mesh(new THREE.TorusGeometry(1, 0.012, 6, 48), new THREE.MeshBasicMaterial({ color: 0xff8a1f, transparent: true, depthWrite: false }));
-    w.layers.set(LAYER.NO_AO); w.visible = false; horn.add(w); U.waves.push(w);
-  }
-  U.hornMouthZ = zB0 + H.bellL;
-  const hnTag = tag('Horn speaker', 'ewsHorn'); hnTag.position.set(H.mouthR + 0.01, 0.05, zB0 + H.bellL / 2); horn.add(hnTag);
-  asm.add(dimension([L.x, yA - 0.07, zA], [hx, yA - 0.07, zA], [0, 0.015, 0], `${((hx - L.x) * 1000).toFixed(0)} mm`, 5));
-
-  // ---------- Kabel horn & standing light: SP21 di box → conduit naik di sisi depan tiang (di belakang krangkeng,
-  // celah jari antipanjat) → menyusuri bawah lengan → kabel masuk cable gland perangkat ----------
-  const S = model.userData.station, rad = THREE.MathUtils.degToRad;
-  const pol = (deg, y, r = 0.063) => [r * Math.cos(rad(deg)), y, r * Math.sin(rad(deg))];
-  model.updateMatrixWorld(true);
-  const hg = hornGland.getWorldPosition(new THREE.Vector3());        // model di titik asal: dunia = lokal model
-  const hgIn = hg.clone().add(new THREE.Vector3(0, Math.sin(rad(H.tilt)), -Math.cos(rad(H.tilt))).multiplyScalar(0.02));
-  const yU = yA - B.size / 2 - 0.009, yLg = yTopArm + 0.026, xLg = L.x + L.R + 0.011;   // conduit di bawah lengan; gland lampu
-  const devCable = (sx, phi, slot, yH, part, tagText, plugTag, endCable) => {
-    const grp = new THREE.Group(); root.add(grp);
-    sp21Cable(S, { slot, wireToY: -0.1085, group: grp, phi, yH, part, endCable, tagText, plugTag,
-      tagAt: pol(phi, d.acY + 0.14, 0.075),
-      route: [pol(phi, yA - 0.13)],
-      tail: [pol(phi, yA - 0.13), [sx * 0.085, yA - 0.11, 0.045], [sx * 0.1, yA - 0.06, zA - 0.005], [sx * 0.125, yU, zA], [sx * 0.25, yU, zA], [sx * 0.4, yU, zA]] });
-    return grp;
-  };
-  U.hornCable = devCable(1, 40, -2, S.cy - 0.49, 'ewsHornCable', 'Kabel horn + conduit', 'SP21 horn', [
-    [0.405, yU, zA], [0.43, yU + 0.012, zA - 0.028], [0.455, yTopArm + 0.02, zA - 0.06], [0.49, hg.y - 0.035, hgIn.z - 0.012], hgIn.toArray(), hg.toArray()]);
-  U.lightCable = devCable(-1, 140, -3, S.cy - 0.53, 'ewsLightCable', 'Kabel standing light + conduit', 'SP21 lampu', [
-    [-0.405, yU, zA], [-0.43, yU + 0.012, zA - 0.028], [-0.47, yTopArm + 0.012, zA - 0.035], [-0.495, yLg, zA - 0.012], [xLg + 0.014, yLg, zA], [xLg, yLg, zA]]);
+  const U = buildAlarm(model, root);                                  // bracket + standing light + horn + kabelnya (ewsAlarm.js)
 
   // ---------- Kabel bus tiltmeter (stasiun): SP21 di box → conduit turun di tiang → melewati base plate & pondasi → tanah ----------
   const fwH = d.fw / 2000, yP1 = d.yP1, yF = F_ABOVE / 1000, zG = fwH + 0.2, xB = 0.08;
@@ -196,8 +77,7 @@ function extend(model) {
            [xB, yF - 0.01, fwH + 0.012], [xB, 0.04, fwH + 0.012], [xB, 0.009, fwH + 0.07], [xB, 0.009, zG]],
     endCable: [[xB, 0.009, zG - 0.005], [xB, CABLE_R + 0.002, zG + 0.03]],
     tagText: 'Kabel bus tiltmeter + conduit', tagAt: pol(67.5, yP1 + 0.5, 0.075), plugTag: 'SP21 bus tiltmeter (master)' });
-  for (const g of [U.hornCable, U.lightCable, U.busCable])           // label ikut hilang saat kabel dilepas (explode)
-    g.traverse(o => { if (o.userData.isTag) o.userData.when = () => !(U.cableFade > 0.5); });
+  U.busCable.traverse(o => { if (o.userData.isTag) o.userData.when = () => !(U.cableFade > 0.5); });   // label ikut hilang saat kabel dilepas
 
   // ---------- Medan: punggung tebing (stasiun), gawir, lereng rawan longsor, dataran bawah ----------
   const T = U.terrain = buildTerrain(); root.add(T.mesh);
@@ -386,9 +266,13 @@ function updateDebris(U, list) {
 }
 
 // Per frame: jalankan simulasi, status otomatis, lampu menyala / berkedip, horn memancarkan gelombang saat Waspada & Awas
-function update(now, { camera } = {}) {
+function update(now, { sky } = {}) {
   const U = cur;
   if (!U) return false;
+  if (rainCreep(now)) ui?.sync();
+  else if (ui && now - (ui.t ?? 0) > 400) { ui.t = now; ui.soilText(); }        // kejenuhan tanah berubah pelan
+  const lk = Math.round((0.18 + 0.82 * (sky?.day ?? 1)) * 50) / 50;             // debu (sprite tanpa cahaya) ikut gelap di malam hari
+  if (lk !== U.dustK) { U.dustK = lk; for (const d of U.debris.dust) d.sp.material.color.setHex(0xb9a384).multiplyScalar(lk); }
   if (sim.running) { sim.tau = Math.min(1, sim.tau0 + (now - sim.t0) / SIM_MS); if (sim.tau >= 1) sim.running = false; }
   let moved = false;
   const simKey = `${sim.site}:${sim.tau}`;
@@ -396,49 +280,38 @@ function update(now, { camera } = {}) {
   const prev = status;
   if (sim.auto) status = levelOf(Math.max(...U.sites.map(t => t.read[2])));
   if (moved || prev !== status) ui?.sync();
-  const st = STATUS[status], blinkOn = !st.blink || now % 1000 < 600;
-  let key = status;
-  U.tiers.forEach((t, i) => {
-    const lit = i === st.tier && blinkOn;
-    if (lit) { t.mat.color.setHex(t.T.on); t.mat.emissive.setHex(t.T.on); t.mat.emissiveIntensity = 1.6; }
-    else if (t.lit) { t.mat.color.setHex(t.T.off); t.mat.emissive.setHex(0); t.mat.emissiveIntensity = 0; }
-    t.lit = lit; key += lit ? i : '-';
-  });
-  const litT = U.tiers.find(t => t.lit);
-  U.halo.visible = !!litT;
-  if (litT) { U.halo.position.set(0, litT.y, 0); U.halo.material.color.setHex(litT.T.on); U.halo.scale.setScalar(0.22); }
-  for (const [i, w] of U.waves.entries()) {
-    w.visible = !!st.horn;
-    if (!st.horn) continue;
-    const p = (now / 1500 + i / 3) % 1, r = HORN.mouthR + 0.5 * p;
-    w.scale.set(r, r, r); w.position.z = U.hornMouthZ + 0.03 + 1.2 * p;
-    w.material.opacity = 0.75 * (1 - p) * Math.min(1, p * 6);
-  }
+  const st = STATUS[status], key = status + driveAlarm(U, st, now, sky?.night ?? 0);   // lampu & gelombang horn (ewsAlarm.js)
   const changed = key !== lastKey; lastKey = key;
   if (moved || sim.running) return true;                             // medan bergerak: render cepat + bayangan
   return changed || st.blink || st.horn ? 'redraw' : false;          // lampu / gelombang horn: kualitas penuh
 }
 
-const COLORS = { off: '#6b7280', aman: '#1f9d4c', waspada: '#c98a00', awas: '#d62b2b' };
+const COLORS = { off: '#8a96ad', aman: '#46d78f', waspada: '#f4cf6a', awas: '#ff7a6b' };
 function panel(el, { invalidate, flyTo }) {
   el.innerHTML = `
     <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:8px"><span>Status peringatan</span><output id="ewsOut" style="font-weight:600"></output></div>
     <div id="ewsBtns" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px"></div>
-    <label class="switch" style="margin:12px 0 14px">Status otomatis dari tiltmeter <input type="checkbox" id="ewsAuto"></label>
-    <label class="field"><div class="row"><span>Titik longsor</span></div>
-      <select id="ewsSite">${SITES.map((s, i) => `<option value="${i}">Mulai di ${s.id} — lereng ${s.x < -1 ? 'kiri' : s.x > 1 ? 'kanan' : 'tengah'}, merambat ke titik lain</option>`).join('')}<option value="-1">Semua titik — longsor besar satu lereng</option></select></label>
-    <div class="btn-row" style="margin:-4px 0 12px"><button id="ewsLook" type="button">Lihat sensor</button><button id="ewsVista" type="button">Lihat lembah</button></div>
+    <label class="switch" style="margin:12px 0 10px">Status otomatis dari tiltmeter <input type="checkbox" id="ewsAuto"></label>
+    <label class="switch" style="margin:0 0 4px">Longsor dipicu hujan <input type="checkbox" id="ewsRain"></label>
+    <div id="ewsSoil" style="font-size:11.5px;line-height:1.45;color:var(--muted);margin:0 0 14px"></div>
+    <div class="row" style="display:flex;justify-content:space-between;margin-bottom:6px"><span>Titik awal longsor</span><output id="ewsSiteOut" style="color:var(--muted)"></output></div>
+    <div id="ewsSite" style="display:grid;grid-template-columns:repeat(6,1fr);gap:4px;margin-bottom:10px">${SITES.map((s, i) => `<button type="button" data-v="${i}" title="Mulai di ${s.id}, merambat ke titik lain">${s.id}</button>`).join('')}<button type="button" data-v="-1" title="Longsor besar satu lereng">Semua</button></div>
+    <div class="btn-row" style="margin:0 0 12px"><button id="ewsLook" type="button">Lihat sensor</button><button id="ewsVista" type="button">Lihat lembah</button></div>
     <label class="field"><div class="row"><span>Pergerakan lereng</span><output id="ewsProg"></output></div>
       <input type="range" id="ewsTau" min="0" max="1" step="0.005"></label>
     <div class="btn-row"><button id="ewsRun"></button><button id="ewsReset">Reset</button></div>
     <table id="ewsTab" style="width:100%;margin-top:12px;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums">
       <thead><tr style="color:var(--muted);text-align:right"><th style="text-align:left;font-weight:600">Sensor</th><th>X</th><th>Y</th><th>Z</th></tr></thead>
       <tbody>${SITES.map(s => `<tr style="text-align:right"><td style="text-align:left"><i style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px"></i>${s.id}</td><td></td><td></td><td></td></tr>`).join('')}</tbody>
-    </table>
-    <p class="note">Tiltmeter 3 axis (°): Waspada ≥ ${LIMIT.waspada}°, Awas ≥ ${LIMIT.awas}° kemiringan total (perkiraan).
-      Longsor: rayapan pelan lalu runtuh (${SIM_MS / 1000} s), mulai di titik terpilih lalu merambat ke titik lain. Tombol status di atas = uji manual (mode otomatis dimatikan).
-      Tiltmeter = slave di bus seri: logger → T1 → … → T5. Semua ukuran &amp; jalur kabel = perkiraan.</p>`;
+    </table>`;
   const $ = s => el.querySelector(s), out = $('#ewsOut'), box = $('#ewsBtns'), auto = $('#ewsAuto'), site = $('#ewsSite');
+  const rainSw = $('#ewsRain'), soil = $('#ewsSoil'), siteOut = $('#ewsSiteOut');
+  const soilText = () => {
+    const W = ENV.W, over = W >= SOIL_CRIT;
+    soil.innerHTML = `Kejenuhan tanah <b style="color:${over ? COLORS.awas : 'var(--ink)'}">${Math.round(W * 100)} %</b> (kritis ≥ ${Math.round(SOIL_CRIT * 100)} %)` +
+      (!sim.rain ? '' : sim.running && sim.byRain ? ' · <b style="color:#ff7a6b">lereng runtuh</b>' : over && sim.tau < 0.5 ? ` · lereng merayap ${Math.round(sim.tau / 0.5 * 100)} %` : '');
+  };
+  rainSw.addEventListener('change', () => { sim.rain = rainSw.checked; soilText(); });
   const tau = $('#ewsTau'), prog = $('#ewsProg'), run = $('#ewsRun'), rows = [...el.querySelectorAll('#ewsTab tbody tr')];
   const sync = () => {
     out.textContent = STATUS[status].label + (sim.auto ? ' · otomatis' : ''); out.style.color = COLORS[status];
@@ -446,7 +319,10 @@ function panel(el, { invalidate, flyTo }) {
       const on = b.dataset.s === status;
       b.style.borderColor = on ? COLORS[b.dataset.s] : ''; b.style.color = on ? COLORS[b.dataset.s] : ''; b.style.fontWeight = on ? 700 : '';
     }
-    auto.checked = sim.auto; site.value = sim.site; tau.value = sim.tau;
+    auto.checked = sim.auto; tau.value = sim.tau; rainSw.checked = sim.rain; soilText();
+    for (const b of site.children) { const on = +b.dataset.v === sim.site; b.setAttribute('aria-pressed', on); b.style.borderColor = on ? 'var(--accent)' : ''; b.style.color = on ? 'var(--ink)' : ''; b.style.background = on ? 'var(--accent-soft)' : ''; }
+    const S0 = SITES[sim.site];
+    siteOut.textContent = sim.site < 0 ? 'seluruh lereng' : `lereng ${S0.x < -1 ? 'kiri' : S0.x > 1 ? 'kanan' : 'tengah'}`;
     prog.textContent = `${Math.round(sim.tau * 100)}%`;
     run.textContent = sim.running ? 'Jeda' : sim.tau >= 1 ? 'Ulangi longsor' : sim.tau > 0 ? 'Lanjutkan' : 'Mulai longsor';
     cur?.sites.forEach((T, i) => {
@@ -462,7 +338,7 @@ function panel(el, { invalidate, flyTo }) {
     box.appendChild(b);
   }
   auto.addEventListener('change', () => { sim.auto = auto.checked; sync(); invalidate(); });
-  site.addEventListener('change', () => { Object.assign(sim, { site: +site.value, tau: 0, running: false }); sync(); invalidate(); });
+  for (const b of site.children) b.addEventListener('click', () => { Object.assign(sim, { site: +b.dataset.v, tau: 0, running: false }); sync(); invalidate(); });
   tau.addEventListener('input', () => { Object.assign(sim, { tau: +tau.value, running: false }); sync(); invalidate(); });
   run.addEventListener('click', () => {
     if (sim.running) sim.running = false;
@@ -477,54 +353,24 @@ function panel(el, { invalidate, flyTo }) {
     const p = cur?.sites[Math.max(0, sim.site)].g.position;
     if (p) flyTo([p.x + 0.9, p.y + 0.75, p.z + 1.3], [p.x, p.y + 0.02, p.z]);
   });
-  $('#ewsReset').addEventListener('click', () => { Object.assign(sim, { tau: 0, running: false }); sync(); invalidate(); });
-  ui = { sync };
+  $('#ewsReset').addEventListener('click', () => { Object.assign(sim, { tau: 0, running: false, byRain: false }); sync(); invalidate(); });
+  ui = { sync, soilText };
   sync();
 }
 
-// Explode: setelah panel surya — mur U-bolt dilepas, U-bolt ditarik ke belakang, bracket + horn + lampu dijauhkan ke depan
+// Explode: bracket horn + lampu dijauhkan setelah panel surya; kabel bus, horn & lampu dilepas (memudar) — ewsAlarm.js
 const explode = {
-  steps: [{ key: 'ews', before: 'ac', w: 12, label: 'lepas U-bolt, bracket horn + lampu dijauhkan' }],
-  apply(model, seg) {
-    const U = model.userData.ews, eN = seg('ews', 0, 0.33), eU = seg('ews', 0.2, 0.6), eA = seg('ews', 0.47, 1);
-    U.nuts.position.z = 0.1 * eN + 0.6 * eA;
-    U.ubolt.position.z = -0.3 * eU;
-    U.asm.position.z = 0.6 * eA;
-    // Kabel bus, horn & lampu: plug SP21 dilepas, kabel sedikit turun lalu dilepas (memudar)
-    const eDn = seg('cable', 0, 0.44), eOff = seg('cable', 0.44, 1);
-    U.cableFade = eOff;
-    for (const g of [U.busCable, U.hornCable, U.lightCable]) {
-      g.position.y = -0.06 * eDn; g.visible = eOff < 0.999;
-      g.traverse(o => {
-        if (!o.isMesh) return;
-        const m = o.material, tr = eOff > 0;
-        if (m.transparent !== tr) { m.transparent = tr; m.needsUpdate = true; }
-        m.opacity = 1 - eOff; m.depthWrite = !tr;
-      });
-    }
-  },
+  steps: [ALARM_STEP],
+  apply(model, seg) { const U = model.userData.ews; alarmExplode(U, seg, [U.busCable]); },
 };
 
 const mm = v => Math.round(v * 1000);
 const parts = {
-  ewsBracket: { name: 'Bracket Horn + Standing Light', group: 'EWS Longsor', specs: d => [
-    ['Plat dudukan', `${mm(BRACKET.plateW)} × ${mm(BRACKET.plateH)} × ${mm(BRACKET.plateT)} mm (perkiraan), cat biru`],
-    ['Lengan', `Hollow 40×40×2, ${mm(2 * BRACKET.half)} mm (perkiraan), dilas ke plat`],
-    ['Klem ke tiang', '2 × U-bolt M10'],
-    ['Posisi', `${mm(BRACKET.drop)} mm di bawah ujung tiang, di atas antipanjat (${armY(d).toFixed(2)} m dari tanah)`],
-  ]},
-  ewsHorn: { name: 'Horn Speaker', group: 'EWS Longsor', specs: () => [
-    ['Bentuk', 'Horn bulat (corong) + unit driver'],
-    ['Ukuran', `Corong Ø${mm(2 * HORN.mouthR)} mm, panjang ± ${mm(HORN.bellL + HORN.driverL + 0.02)} mm (perkiraan)`],
-    ['Pasang', `Dudukan U di ujung kanan lengan, menghadap ke lembah, miring turun ${HORN.tilt}°`],
-    ['Bunyi', 'Status Waspada & Awas (simulasi)'],
-  ]},
-  ewsLight: { name: 'Standing Light (Tower Light)', group: 'EWS Longsor', specs: () => [
-    ['Susunan', 'Hijau (bawah) – kuning – merah (atas)'],
-    ['Ukuran', `Ø${mm(2 * LIGHT.R)} mm, tinggi ± ${mm(LIGHT.baseH + 3 * LIGHT.tierH + 4 * LIGHT.ring + LIGHT.capH + 0.006)} mm (perkiraan)`],
-    ['Pasang', 'Berdiri di ujung kiri lengan'],
-    ['Simulasi', 'Aman = hijau, Waspada = kuning kedip, Awas = merah kedip'],
-  ]},
+  ...alarmParts('EWS Longsor', {
+    hadap: 'ke lembah', bunyi: 'Status Waspada & Awas (simulasi)', simulasi: 'Aman = hijau, Waspada = kuning kedip, Awas = merah kedip',
+    hornJalur: 'Conduit naik di sisi depan-kanan tiang (celah jari antipanjat), menyusuri bawah lengan',
+    lampuJalur: 'Conduit naik di sisi depan-kiri tiang (celah jari antipanjat), menyusuri bawah lengan',
+  }),
   tiltmeter: { name: 'Tiltmeter 3 Axis', group: 'EWS Longsor', specs: () => [
     ['Fungsi', 'Mengukur kemiringan tanah (sumbu X, Y, Z)'],
     ['Bentuk', `Kotak ${mm(TILT.w)} × ${mm(TILT.d)} × ${mm(TILT.h)} mm (perkiraan)`],
@@ -550,16 +396,6 @@ const parts = {
     ['Di lapangan', 'Kabel di permukaan: punggung tebing → gawir → antar plinth (jalur perkiraan)'],
     ['Di sensor', 'Masuk gland IN, keluar gland OUT ke sensor berikutnya'],
   ]},
-  ewsHornCable: { name: 'Kabel Horn', group: 'EWS Longsor', specs: () => [
-    ['Dari', 'Konektor SP21 di box (slot ke-3 dari kanan)'],
-    ['Jalur', 'Conduit naik di sisi depan-kanan tiang (celah jari antipanjat), menyusuri bawah lengan'],
-    ['Ke', 'Cable gland di belakang unit driver horn'],
-  ]},
-  ewsLightCable: { name: 'Kabel Standing Light', group: 'EWS Longsor', specs: () => [
-    ['Dari', 'Konektor SP21 di box (slot ke-4 dari kanan)'],
-    ['Jalur', 'Conduit naik di sisi depan-kiri tiang (celah jari antipanjat), menyusuri bawah lengan'],
-    ['Ke', 'Cable gland di sisi dasar lampu'],
-  ]},
   cliff: { name: 'Tebing & Lereng', group: 'EWS Longsor', specs: () => [
     ['Stasiun', `Di punggung tebing, ${CLIFF.crest} m dari tepi`],
     ['Beda tinggi', `± ${CLIFF.drop} m (visual, perkiraan)`],
@@ -569,8 +405,8 @@ const parts = {
 };
 
 export const ewsLandslide = {
-  // antipanjat harus cukup rendah agar bracket muat di bawah panel surya
-  encYMax: d => d.yTop - BRACKET.drop - BRACKET.plateH / 2 - 0.08 - CAGE.H / 2000 - 0.55,
+  encYMax: alarmEncYMax,
   extend, update, panel, explode, parts,
+  mapStatus: () => ({ off: 'base', aman: 'good', waspada: 'warn', awas: 'crit' })[status],
   views: { iso: [[12, 3, 26], [0.5, -4, 6.5]] },
 };

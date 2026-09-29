@@ -12,19 +12,23 @@
 // Nama lengkap yang ditandai `confirm` masih perlu dikonfirmasi.
 export const PRODUCTS = [
   { id: 'awlr-sungai', code: 'AWLR', variant: 'Sungai', name: 'Automatic Water Level Recorder', confirm: true, icon: 'wave',
-    desc: 'Tiang 3" × 4 m, lengan sensor 3 m di atas sungai', status: 'Lengan + sensor',
+    desc: 'Tiang 3" × 4 m, lengan sensor 3 m di atas sungai', status: 'Simulasi muka air',
     load: () => import('./products/awlrRiver.js').then(m => m.awlrRiver) },
   { id: 'awlr-sumur', code: 'AWLR', variant: 'Sumur Pantau', name: 'Automatic Water Level Recorder', confirm: true, icon: 'wave',
     desc: 'Pencatat tinggi muka air sumur' },
   { id: 'arr', code: 'ARR', name: 'Automatic Rainfall Recorder', confirm: true, icon: 'rain',
-    desc: 'Pencatat curah hujan' },
+    desc: 'Monopole + sensor curah hujan tipping bucket di pangkal saluran tersier sawah', status: 'Simulasi hujan',
+    load: () => import('./products/arr.js').then(m => m.arr) },
   { id: 'awr', code: 'AWR', name: '', icon: 'station', desc: '' },
   { id: 'vnotch', code: 'V-Notch', name: 'Pengukur debit ambang V-Notch', confirm: true, icon: 'vnotch',
-    desc: 'Sensor level di bracket dinding kolam, di atas takik V saluran limpasan sawah', status: 'Bracket + sensor',
+    desc: 'Sensor level di bracket dinding kolam, di atas takik V saluran limpasan sawah', status: 'Simulasi debit',
     load: () => import('./products/vnotch.js').then(m => m.vnotch) },
   { id: 'ews-longsor', code: 'EWS', variant: 'Longsor', name: 'Early Warning System', confirm: true, icon: 'siren',
     desc: 'Stasiun di atas tebing, horn + standing light, 5 tiltmeter di lereng', status: 'Simulasi longsor',
     load: () => import('./products/ewsLandslide.js').then(m => m.ewsLandslide) },
+  { id: 'ews-banjir', code: 'EWS', variant: 'Banjir', name: 'Early Warning System', confirm: true, icon: 'siren',
+    desc: 'Di hulu sungai: AWLR (lengan + sensor radar) + horn + standing light', status: 'Simulasi banjir',
+    load: () => import('./products/ewsFlood.js').then(m => m.ewsFlood) },
 ];
 
 export const productById = id => PRODUCTS.find(p => p.id === id);

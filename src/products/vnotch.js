@@ -3,7 +3,8 @@ import { MAT } from '../materials.js';
 import { holedPlate, mesh, rodBetween } from '../geometry.js';
 import { dimension, tag } from '../labels.js';
 import { sp21Cable, CONDUIT_R, POLE_GAP } from '../model/sp21.js';
-import { SAWAH, SITES } from '../world.js';
+import { SAWAH, SITES, riverAt } from '../world.js';
+import { BANK, ENV } from '../env.js';
 
 // V-Notch (satuan m). Dari foto pemasangan user: bracket dinding baja cat biru dibaut ke muka dalam dinding kolam penenang —
 // tiang kanal-C dengan plat atas & bawah (masing-masing 2 baut angkur), lengan mendatar + batang miring (sambungan baut),
@@ -107,6 +108,8 @@ function extend(model) {
   for (const y of [yLb + BR.L.t + 0.004, yLb - 0.004]) sn.add(at(mesh(hexGeo(0.05, 0.008), steel, 'vnSensor'), xC, y, 0));   // 2 mur penjepit
   const snTag = tag('Sensor ultrasonik Ø40 (bodi berulir)', 'vnSensor', { maxDist: 8 }); snTag.position.set(xC + SENSOR.R + 0.01, yFace + 0.02, 0); sn.add(snTag);
   sn.add(dimension([xC + 0.09, yFace, 0], [xC + 0.09, Y(VN.notch), 0], [0.02, 0, 0], `${toNotch().toFixed(2)} m ke dasar takik V`, 8));
+  const wDim = dimension([xC, yFace, -0.1], [xC, Y(VN.water), -0.1], [0.02, 0, 0], '', 6);   // sensor → muka air kolam (env.js)
+  sn.add(wDim); U.wDim = wDim; U.lastH = null;
 
   // ---------- Kabel sensor dalam conduit hitam → konektor SP21 kedua di box ----------
   // Mengikuti gravitasi (tidak ada bentang lurus di udara): turun menyusuri tiang di sela stiffener (35°), melengkung keluar
@@ -174,8 +177,59 @@ const parts = {
   ]},
 };
 
+// ---------- Simulasi debit (env.js): H = tinggi air di atas dasar takik, Q = 1,38 · H^2,5 ----------
+// Air kolam datang dari saluran sawah (pintu pengambilan di sungai → sungai surut = V-Notch surut) + limpasan hujan dari petak.
+const flooded = () => ENV.dh > BANK && riverAt(SITES.vnotch.x) + ENV.dh > VN.top;   // genangan banjir di atas dinding kolam
+let ui = null;
+function update(now, { model }) {
+  const U = model.userData.vnotch;
+  if (!U) return false;
+  if (U.lastH === null || Math.abs(ENV.H - U.lastH) > 0.001) {
+    U.lastH = ENV.H;
+    const [line, lbl] = U.wDim.children, p = line.geometry.attributes.position, yW = Y(VN.notch) + ENV.H, T = 0.02;
+    [[xC, yFace], [xC, yW], [xC - T, yFace], [xC + T, yFace], [xC - T, yW], [xC + T, yW]].forEach(([x, y], i) => p.setXYZ(i, x, y, -0.1));
+    p.needsUpdate = true; line.geometry.computeBoundingSphere();
+    lbl.position.set(xC, (yFace + yW) / 2, -0.1); lbl.element.textContent = `${(yFace - yW).toFixed(3)} m ke muka air`;
+  }
+  if (ui && now - ui.t > 200) { ui.t = now; ui.sync(); }
+  return false;
+}
+function panel(el, { flyTo }) {
+  const td = 'style="text-align:right;font-weight:600"';
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:8px"><span>Aliran di takik V</span><output id="vnSt" style="font-weight:700"></output></div>
+    <table style="width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums;margin-bottom:10px">
+      <tr><td>Tinggi air di atas takik (H)</td><td id="vnH" ${td}></td></tr>
+      <tr><td>Debit Q = 1,38 · H<sup>2,5</sup></td><td id="vnQ" ${td}></td></tr>
+      <tr><td>Jarak sensor → muka air</td><td id="vnD" ${td}></td></tr>
+      <tr><td>Dari saluran sawah</td><td id="vnQc" ${td}></td></tr>
+      <tr><td>Dari limpasan hujan</td><td id="vnQr" ${td}></td></tr>
+      <tr><td>Pintu pengambilan sungai</td><td id="vnIn" ${td}></td></tr>
+    </table>
+    <div class="btn-row"><button type="button" id="vnLook">Lihat takik</button><button type="button" id="vnIso">Iso</button></div>`;
+  const $ = s => el.querySelector(s);
+  const o = Object.fromEntries(['vnSt', 'vnH', 'vnQ', 'vnD', 'vnQc', 'vnQr', 'vnIn'].map(k => [k, $('#' + k)]));
+  $('#vnLook').addEventListener('click', () => flyTo([xC + 1.25, Y(VN.notch) + 0.95, VN.toPlate + 2.1], [xC, Y(VN.notch) - 0.05, VN.toPlate + 0.1], 1100));   // dari hilir, pancaran lewat takik
+  $('#vnIso').addEventListener('click', () => flyTo(...vnotch.views.iso, 1100));
+  function sync() {
+    if (!o.vnSt.isConnected) return;                                          // panel sudah diganti seri lain
+    const H = ENV.H, Q = ENV.Q, fl = flooded(), gap = yFace - Y(VN.notch) - H;
+    const [txt, c] = fl ? ['Terendam banjir', '#ff7a6b'] : H < 0.003 ? ['Tidak ada aliran', '#93c5fd'] : gap < 0.1 ? ['Air dekat muka sensor', '#ff7a6b']
+      : H > 0.18 ? ['Tinggi', '#f4cf6a'] : H < 0.07 ? ['Rendah', '#93c5fd'] : ['Normal', '#46d78f'];
+    o.vnSt.textContent = txt; o.vnSt.style.color = c;
+    o.vnH.textContent = `${(H * 100).toFixed(1)} cm`;
+    o.vnQ.textContent = `${(Q * 1000).toFixed(1)} L/dtk`;
+    o.vnD.textContent = `${(yFace - Y(VN.notch) - H).toFixed(3)} m`;
+    o.vnQc.textContent = `${(ENV.Qc * 1000).toFixed(1)} L/dtk`;
+    o.vnQr.textContent = `${(ENV.Qr * 1000).toFixed(1)} L/dtk`;
+    o.vnIn.textContent = ENV.qIn < 0.02 ? 'kering (sungai di bawah ambang)' : `${Math.round(ENV.qLag * 100)} % dari normal`;
+  }
+  ui = { sync, t: 0 };
+  sync();
+}
+
 export const vnotch = {
-  extend, parts,
+  extend, parts, update, panel,
+  mapStatus: () => (flooded() ? 'crit' : ENV.H < 0.003 ? 'low' : ENV.H > 0.18 ? 'warn' : 'good'),
   views: { iso: [[2.3, 1.55, 2.9], [1.35, 0.4, 0.05]] },                 // dari hilir menghadap takik, bracket di samping (seperti foto)
-  info: 'Sensor level air pada bracket dinding kolam penenang, di atas takik V 90° saluran limpasan sawah. Simulasi debit belum dibuat.',
 };
