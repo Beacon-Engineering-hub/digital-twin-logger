@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Digital Twin — Produk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+<div id="app"></div>
+
+<main id="home">
+  <div id="ovLabels" class="ov-labels"></div>
+  <aside class="ov-rail">
+    <div class="ov-brand">
+      <div class="ov-eyebrow">Digital Twin · Stasiun Data Logger</div>
+      <h1>Peta kawasan</h1>
+      <p>Klik titik stasiun di peta atau pilih dari daftar untuk masuk ke tampilan per logger.</p>
+    </div>
+    <div class="ov-h3">Stasiun</div>
+    <div class="ov-list" id="productGrid"></div>
+  </aside>
+  <nav class="ov-views" id="ovViews"></nav>
+  <div class="ov-legend ov-glass">
+    <span><i class="dot" data-st="good"></i>Stasiun di peta — klik untuk masuk</span>
+    <span class="ov-note">Peta = scene yang sama dengan tampilan logger (diorama skematis)</span>
+  </div>
+  <div class="ov-hint ov-glass">Drag: putar · Scroll: zoom · Klik kanan: geser · Klik titik: masuk ke logger</div>
+  <div class="ov-loading" id="ovLoading"><i></i>Memuat peta kawasan…</div>
+</main>
+
+<div id="viewer" hidden>
+
+<aside id="panel">
+  <header>
+    <a class="back" href="#/">← Peta kawasan</a>
+    <h1 id="prodCode"></h1>
+    <p id="prodName"></p>
+  </header>
+
+  <section id="prodSec">
+    <h2>Simulasi</h2>
+    <div id="prodPanel"></div>
+  </section>
+
+  <section>
+    <h2>Enclosure</h2>
+    <div class="spec-line"><strong>B&amp;J 504020</strong><span>410 × 510 × 200 mm · portrait</span></div>
+    <label class="field">
+      <div class="row"><span>Tinggi pasang (tengah box)</span><output id="encYOut"></output></div>
+      <input type="range" id="encY" min="0.8" max="3" step="0.05" value="1.5">
+    </label>
+    <label class="field">
+      <div class="row"><span>Pintu krangkeng</span><output id="cageDoorOut">0°</output></div>
+      <input type="range" id="cageDoor" min="0" max="135" step="1" value="0">
+    </label>
+    <label class="field">
+      <div class="row"><span>Pintu box — engsel kanan</span><output id="doorOut">0°</output></div>
+      <input type="range" id="door" min="0" max="110" step="1" value="0">
+    </label>
+    <div class="btn-row">
+      <button id="cageToggle">Buka krangkeng</button>
+      <button id="doorToggle">Buka pintu box</button>
+    </div>
+    <label class="switch" style="margin: 12px 0 0">Gembok terkunci <input type="checkbox" id="locked" checked></label>
+  </section>
+
+  <section>
+    <h2>Tampilan</h2>
+    <label class="switch">X-ray beton &amp; tanah <input type="checkbox" id="xray"></label>
+    <label class="switch">Label komponen <input type="checkbox" id="labels" checked></label>
+    <label class="switch">Garis dimensi <input type="checkbox" id="dims" checked></label>
+    <label class="field">
+      <div class="row"><span>Explode view</span><output id="explodeOut">0%</output></div>
+      <input type="range" id="explode" min="0" max="1" step="0.01" value="0">
+    </label>
+    <div class="views">
+      <button data-view="iso">Iso</button>
+      <button data-view="base">Base</button>
+      <button data-view="box">Box</button>
+      <button data-view="solar">Solar</button>
+      <button data-view="lock">Kunci</button>
+      <button data-view="inside">Isi</button>
+      <button data-view="front">Depan</button>
+      <button data-view="top">Atas</button>
+    </div>
+  </section>
+
+  <section>
+    <button class="btn-primary" id="export">Unduh model (.glb)</button>
+    <p class="note">Tiang 3" × 3 m, base plate 250 × 250 × 10 mm. Baut angkur &amp; ukuran panel surya masih perkiraan.</p>
+  </section>
+</aside>
+
+<div id="info" hidden>
+  <button class="close" id="infoClose" aria-label="Tutup">×</button>
+  <div class="kicker" id="infoKicker"></div>
+  <h3 id="infoTitle"></h3>
+  <dl id="infoSpecs"></dl>
+</div>
+
+<div id="hint">Drag: putar · Scroll: zoom · Klik kanan: geser · Klik komponen untuk detail</div>
+</div>
+
+<script type="module" src="/src/app.js"></script>
+</body>
+</html>
