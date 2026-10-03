@@ -101,15 +101,19 @@ const RS = 0.007, riverLevelL = zl => RIVER.water - RS * THREE.MathUtils.clamp(z
 export const riverAt = wx => AWLR_POS.y + riverLevelL(RF.x - wx);           // y dunia muka air sungai di x dunia
 export const SAWAH = makeSawah({ zRiver, halfW: wx => riverHalfW(RF.x - wx), riverAt });
 
-// ---------- EWS Banjir di hulu (± 290 m ke hulu dari AWLR, titik pilihan user; tepi sisi tebing): lengan sensor tegak lurus alur, muka krangkeng,
-// horn & lampu menghadap ke hilir. Tiang ± 1 m di belakang puncak tebing sungai (lereng 1 : 1,1 di atas air); pad diratakan
-// 0,9 m di atas muka air normal seperti tebing di AWLR (bacaan sensor & ambang sama). Letak = diorama (karangan). ----------
-export const HULU = (() => {
-  const xc = 320, zl = RF.x - xc, hw = riverHalfW(zl), e = 0.5;
+// ---------- Stasiun di tebing sungai sisi bukit pada x dunia xc: lengan sensor tegak lurus alur, muka krangkeng menghadap ke hilir.
+// Tiang ± 1 m di belakang puncak tebing sungai (lereng 1 : 1,1 di atas air); pad diratakan 0,9 m di atas muka air normal seperti
+// tebing di AWLR (bacaan sensor & ambang sama). Letak = diorama (karangan). ----------
+function bankSite(xc) {
+  const zl = RF.x - xc, hw = riverHalfW(zl), e = 0.5;
   const dz = (zRiver(xc + e) - zRiver(xc - e)) / (2 * e), len = Math.hypot(dz, 1), nx = -dz / len, nz = 1 / len;   // normal tepi → sumbu
   const dP = hw + BANK * 0.91 + 1.0;                                              // jarak tiang dari sumbu alur
   return { xc, hw, dP, x: xc - nx * dP, z: zRiver(xc) - nz * dP, rot: Math.atan2(-1, -dz), water: riverAt(xc) };
-})();
+}
+// EWS Banjir di hulu (± 290 m ke hulu dari AWLR, titik pilihan user); horn & lampu ikut menghadap ke hilir
+export const HULU = bankSite(320);
+// AFMR (± 128 m ke hulu dari AWLR, titik pilihan user): monopole + lengan AWLR diperpanjang + radar flow meter HRF600S
+export const AFMR = bankSite(158);
 // Muka air sungai (m dari normal) di x dunia: hilir AWLR = dh, hulu EWS Banjir = dhUp, di antaranya gelombang banjir menjalar
 const riverK = wx => THREE.MathUtils.clamp((wx - RF.x) / (HULU.xc - RF.x), 0, 1);
 export const dhAt = (E, wx) => E.dh + (E.dhUp - E.dh) * riverK(wx);
@@ -126,6 +130,7 @@ export const SITES = {
   'awlr-sumur': { x: 76, z: zRiver(76) + 32, rot: 0.6, clear: 14, flat: [8, 24] },
   'vnotch': { ...SAWAH.vnotchSpot, clear: 6 },
   'ews-banjir': { x: HULU.x, z: HULU.z, rot: HULU.rot, h: 4, flat: [9, 26], clear: 12, pad: HULU.water + BANK },
+  'afmr': { x: AFMR.x, z: AFMR.z, rot: AFMR.rot, h: 4, flat: [9, 26], clear: 12, pad: AFMR.water + BANK },
 };
 SITES['awlr-sumur'].well = [SITES['awlr-sumur'].x + 2, SITES['awlr-sumur'].z];
 const segDist = (x, z, [x0, z0], [x1, z1]) => {
@@ -205,8 +210,10 @@ function treeFree(x, z, rad) {
   if (x > 2 && x < 38 && u > 18 && u < 50) return false;                         // kamera "Lihat lembah" EWS
   const I = worldInfo(x, z); if (I.bank || I.d < I.hw + 4.5 + rad) return false; // sungai & tebing sungai
   const [xl, zl] = toA(x, z); if (xl > -14 && xl < 1.8 && zl > 1.5 && zl < 32) return false;   // kamera Iso AWLR
-  { const H = SITES['ews-banjir'], dx = x - H.x, dz = z - H.z, c = Math.cos(H.rot), sn = Math.sin(H.rot), lx = dx * c - dz * sn, lz = dx * sn + dz * c;
-    if (lx > -11 && lx < 3 && lz > 0 && lz < 18) return false; }                // kamera EWS Banjir (dari hilir, sisi darat)
+  for (const id of ['ews-banjir', 'afmr']) {                                    // kamera EWS Banjir & AFMR (dari hilir, sisi darat)
+    const H = SITES[id], dx = x - H.x, dz = z - H.z, c = Math.cos(H.rot), sn = Math.sin(H.rot), lx = dx * c - dz * sn, lz = dx * sn + dz * c;
+    if (lx > -11 && lx < 3 && lz > 0 && lz < 18) return false;
+  }
   for (const s of Object.values(SITES)) if (Math.hypot(x - s.x, z - s.z) < (s.clear ?? 9) + rad) return false;
   if (SAWAH.dist(x, z) < 1.5 + rad) return false;                               // sawah, saluran, pintu air
   return true;
@@ -244,7 +251,7 @@ export function march(lo, hi, bands, grow = 0.07, maxStep = 4) {
 //    kelokan sungai → titik sambungan kedua grid identik, jadi medan menyambung tanpa celah.
 export const U_SPLIT = 34;
 export const WX = march(-180, 380, [[-26, 26, 0.25], [RF.x - 12, RF.x + 12, 0.3], [RF.x - 40, RF.x + 40, 0.45], [-112, 62, 1.2],
-  [HULU.x - 14, HULU.x + 14, 0.3]], 0.07, 4);
+  [HULU.x - 14, HULU.x + 14, 0.3], [AFMR.x - 14, AFMR.x + 14, 0.3]], 0.07, 4);
 export const EWS_U = march(-180, U_SPLIT, [[-6, 17, 0.15]], 0.07, 4);
 const RIVER_U = march(-16, 200, [[-14, 14, 0.2], [12, 118, 1.2]], 0.07, 4), SEAM_K = 14;     // kolom relatif sumbu sungai + kolom peralihan
 function buildRiverSide() {

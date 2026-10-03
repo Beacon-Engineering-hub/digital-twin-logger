@@ -6,8 +6,8 @@ import { ICONS, PRODUCTS, productById } from './products.js';
 const home = document.getElementById('home'), viewerEl = document.getElementById('viewer');
 const icon = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] ?? ICONS.station}</svg>`;
 
-// EWS Longsor, AWLR Sungai, V-Notch, EWS Banjir & ARR berdiri di peta (dunia bersama); seri lain dibuka di lokasinya saat dipilih dari daftar.
-const MAP_IDS = ['ews-longsor', 'awlr-sungai', 'vnotch', 'ews-banjir', 'arr'];
+// EWS Longsor, AWLR Sungai, AFMR, V-Notch, EWS Banjir & ARR berdiri di peta (dunia bersama); seri lain dibuka di lokasinya saat dipilih dari daftar.
+const MAP_IDS = ['ews-longsor', 'awlr-sungai', 'afmr', 'vnotch', 'ews-banjir', 'arr'];
 let viewer = null;
 const list = document.getElementById('productGrid');
 list.innerHTML = PRODUCTS.map(p => `
@@ -51,13 +51,14 @@ async function route() {
 addEventListener('hashchange', route);
 // Muat viewer + definisi lengkap stasiun peta, bangun dunia sekali, lalu buka sesuai alamat
 (async () => {
-  viewer = await import('./main.js');
+  const v = await import('./main.js');                       // viewer baru dipakai route() setelah init (hash bisa berubah saat memuat)
   for (const p of PRODUCTS.filter(p => MAP_IDS.includes(p.id))) p.full ??= { ...p, ...(await p.load?.()) };
-  viewer.init({
+  v.init({
     products: PRODUCTS.map(p => p.full ?? p), mapIds: MAP_IDS,
     onOpen: id => { location.hash = `#/produk/${id}`; },
     onHover: id => { for (const b of list.children) b.classList.toggle('hover', b.dataset.id === id); },
   });
+  viewer = v;
   const ld = document.getElementById('ovLoading'); ld.classList.add('done'); setTimeout(() => { ld.hidden = true; }, 450);
   route();
 })();

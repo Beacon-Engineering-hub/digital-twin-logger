@@ -68,13 +68,17 @@ function pipe(len, axis, r = ARM.pipeR, wall = ARM.pipeWall) {
   return axis === 'x' ? g.rotateZ(-Math.PI / 2) : g;
 }
 
-// opts (dipakai juga EWS Banjir): level() = muka air di stasiun ini (m dari normal, env.js), river = { xc, width, part, label }
-// = sumbu & lebar alur di depan stasiun untuk label / dimensi sungai (bawaan: penampang RIVER di stasiun AWLR)
+// opts (dipakai juga EWS Banjir & AFMR): level() = muka air di stasiun ini (m dari normal, env.js), river = { xc, width, part, label }
+// = sumbu & lebar alur di depan stasiun untuk label / dimensi sungai (bawaan: penampang RIVER di stasiun AWLR),
+// sensor: false = lengan & dudukan saja, tanpa sensor radar, kabel sensor & dimensi ke muka air (sensor lain dipasang
+// pemanggil memakai U.mount); plate: false = tanpa plat dudukan di ujung pipa bawah; caps: true = ujung luar pipa lengan ditutup;
+// arm = { top, bottom, posts } mengganti panjang rangka lengan (bawaan ARM)
 function extend(model, opts = {}) {
   const d = model.userData.d, S = model.userData.station, ro = S.ro;
   const { yA0, yb, yt, ySC } = armLevels(d.encY);
   const x0 = SLEEVE.R - 0.003;                          // pangkal pipa lengan (dilas ke sleeve)
-  const xb1 = x0 + ARM.bottom;                          // ujung pipa bawah
+  const A = { ...ARM, ...opts.arm };                    // panjang rangka lengan (bisa diganti per seri)
+  const xb1 = x0 + A.bottom;                            // ujung pipa bawah
   const at = (m, x, y, z) => { m.position.set(x, y, z); return m; };
   const U = {};
   const root = new THREE.Group(); root.name = 'awlr'; model.add(root);
@@ -98,21 +102,26 @@ function extend(model, opts = {}) {
       armG.add(bolt); U.sleeveBolts.push({ bolt, dir });
     }
   }
-  armG.add(at(mesh(pipe(ARM.top, 'x'), blue, 'awlrArm'), x0, yt, 0), at(mesh(pipe(ARM.bottom, 'x'), blue, 'awlrArm'), x0, yb, 0));
-  for (const px of ARM.posts) armG.add(at(mesh(pipe(yt - yb, 'y'), blue, 'awlrArm'), x0 + px, yb, 0));
-  const xl = x0 + ARM.posts.at(-1), yLug = yt + ARM.pipeR + 0.014;
+  armG.add(at(mesh(pipe(A.top, 'x'), blue, 'awlrArm'), x0, yt, 0), at(mesh(pipe(A.bottom, 'x'), blue, 'awlrArm'), x0, yb, 0));
+  if (opts.caps) {                                      // ujung luar pipa atas & bawah ditutup plat bulat (dilas, dicat biru)
+    const capGeo = new THREE.CylinderGeometry(ARM.pipeR, ARM.pipeR, 0.003, 32).rotateZ(Math.PI / 2);
+    armG.add(at(mesh(capGeo, blue, 'awlrArm'), x0 + A.top + 0.0015, yt, 0), at(mesh(capGeo, blue, 'awlrArm'), x0 + A.bottom + 0.0015, yb, 0));
+  }
+  for (const px of A.posts) armG.add(at(mesh(pipe(yt - yb, 'y'), blue, 'awlrArm'), x0 + px, yb, 0));
+  const xl = x0 + A.posts.at(-1), yLug = yt + ARM.pipeR + 0.014;
   armG.add(at(mesh(holedPlateXY(0.03, 0.036, 0.005, [[0, 0.004, 0.0055]]), blue, 'awlrArm'), xl, yLug, 0));   // lug sling (dilas)
   // Dudukan sensor: plat datar di bawah ujung pipa bawah, slot terbuka ke +X untuk leher ulir sensor
   const xc = xb1 + 0.065, pt = yb - ARM.pipeR, xp0 = xb1 - 0.05, xp1 = xc + 0.055, sw = 0.025;
   const ps = new THREE.Shape();
   ps.moveTo(xp0, -0.05); ps.lineTo(xp1, -0.05); ps.lineTo(xp1, -sw); ps.lineTo(xc, -sw);
   ps.absarc(xc, 0, sw, -Math.PI / 2, Math.PI / 2, true); ps.lineTo(xp1, sw); ps.lineTo(xp1, 0.05); ps.lineTo(xp0, 0.05); ps.closePath();
-  armG.add(at(mesh(new THREE.ExtrudeGeometry(ps, { depth: PLATE_T, bevelEnabled: false, curveSegments: 16 }).rotateX(Math.PI / 2), blue, 'awlrArm'), 0, pt, 0));
-  const armTag = tag('Lengan sensor (pipa)', 'awlrArm'); armTag.position.set(x0 + 1.5, yt + 0.03, 0); armG.add(armTag);
+  if (opts.plate !== false) armG.add(at(mesh(new THREE.ExtrudeGeometry(ps, { depth: PLATE_T, bevelEnabled: false, curveSegments: 16 }).rotateX(Math.PI / 2), blue, 'awlrArm'), 0, pt, 0));
+  U.mount = { xc, xb1, yb, yA0, pt, pb: pt - PLATE_T, zc: POLE_GAP * Math.sin(Math.PI / 6) };   // dudukan & jalur kabel untuk sensor lain
+  const armTag = tag('Lengan sensor (pipa)', 'awlrArm'); armTag.position.set(x0 + A.top / 2, yt + 0.03, 0); armG.add(armTag);
   const svTag = tag('Sleeve + 8 baut', 'awlrSleeve', { maxDist: 4 }); svTag.position.set(-SLEEVE.R, yA0 + SLEEVE.len / 2, 0.03); armG.add(svTag);
   armG.add(
-    dimension([x0, yt + 0.09, 0], [x0 + ARM.top, yt + 0.09, 0], [0, 0.02, 0], '3000 mm', 9),
-    dimension([x0, yb - 0.4, 0], [xb1, yb - 0.4, 0], [0, 0.02, 0], '3100 mm', 9),
+    dimension([x0, yt + 0.09, 0], [x0 + A.top, yt + 0.09, 0], [0, 0.02, 0], `${Math.round(A.top * 1000)} mm`, 9),
+    dimension([x0, yb - 0.4, 0], [xb1, yb - 0.4, 0], [0, 0.02, 0], `${Math.round(A.bottom * 1000)} mm`, 9),
   );
 
   // ---------- Klem sling di tiang + sling Ø6 ----------
@@ -209,37 +218,39 @@ function extend(model, opts = {}) {
   slTag.position.copy(pinA.clone().lerp(pinB, 0.5)).add(V3(0, 0.02, 0)); sling.add(slTag);
 
   // ---------- Sensor radar: badan biru di atas dudukan, leher ulir lewat slot, mur kunci, horn kerucut ke bawah ----------
-  const sensor = U.sensor = newG(), sNut = U.sNut = newG();
-  const Sn = SENSOR, hBlue = new THREE.MeshStandardMaterial({ color: 0x4f9fd6, roughness: 0.45 }), steel = MAT.galv();
-  const pb = pt - PLATE_T, yHorn = pb - 0.048, capGeo = new THREE.SphereGeometry(Sn.housingR, 40, 8, 0, Math.PI * 2, 0, Math.PI / 4);
-  capGeo.scale(1, 0.5, 1);
-  const hornMat = steel.clone(); hornMat.side = THREE.DoubleSide;
-  sensor.add(
-    at(mesh(new THREE.CylinderGeometry(Sn.housingR, Sn.housingR, Sn.housingH, 40), hBlue, 'awlrSensor'), xc, pt + Sn.housingH / 2, 0),
-    at(mesh(capGeo, hBlue.clone(), 'awlrSensor'), xc, pt + Sn.housingH - Sn.housingR * Math.cos(Math.PI / 4) * 0.5, 0),
-    at(mesh(new THREE.CylinderGeometry(Sn.housingR + 0.0004, Sn.housingR + 0.0004, 0.034, 16, 1, true, Math.PI / 2 - 0.4, 0.8), MAT.whitePl(), 'awlrSensor'), xc, pt + 0.07, 0),   // label
-    at(mesh(new THREE.CylinderGeometry(Sn.threadR, Sn.threadR, pt - yHorn + 0.004, 24), steel, 'awlrSensor'), xc, (pt + yHorn) / 2, 0),   // leher ulir
-    at(mesh(new THREE.CylinderGeometry(Sn.hornR0 + 0.004, Sn.hornR0 + 0.004, 0.006, 24), steel, 'awlrSensor'), xc, yHorn, 0),
-    at(mesh(new THREE.CylinderGeometry(Sn.hornR0, Sn.hornR1, Sn.hornL, 40, 1, true), hornMat, 'awlrSensor'), xc, yHorn - Sn.hornL / 2, 0),   // horn
-  );
-  const gland = at(mesh(new THREE.CylinderGeometry(0.007, 0.008, 0.014, 16).rotateX(Math.PI / 2), MAT.plastic(), 'awlrSensor'), xc, pt + 0.07, Sn.housingR + 0.007);
-  sensor.add(gland);
-  sNut.add(at(mesh(new THREE.CylinderGeometry(Sn.nutR, Sn.nutR, 0.018, 6), steel, 'awlrSensor'), xc, pb - 0.009, 0));   // mur kunci di bawah dudukan
-  const snTag = tag('Sensor radar level air', 'awlrSensor'); snTag.position.set(xc + Sn.housingR, pt + 0.06, 0); sensor.add(snTag);
-  const yBot = sensorBottom(yb);
-  const lvDim = dimension([xc + 0.12, yBot, 0], [xc + 0.12, RIVER.water, 0], [0.03, 0, 0], `${(yBot - RIVER.water).toFixed(2)} m ke muka air`, 12);
-  sensor.add(lvDim); U.lvDim = { dim: lvDim, x: xc + 0.12, yBot }; U.yBot = yBot;   // ikut muka air (env.js)
+  if (opts.sensor !== false) {
+    const sensor = U.sensor = newG(), sNut = U.sNut = newG();
+    const Sn = SENSOR, hBlue = new THREE.MeshStandardMaterial({ color: 0x4f9fd6, roughness: 0.45 }), steel = MAT.galv();
+    const pb = pt - PLATE_T, yHorn = pb - 0.048, capGeo = new THREE.SphereGeometry(Sn.housingR, 40, 8, 0, Math.PI * 2, 0, Math.PI / 4);
+    capGeo.scale(1, 0.5, 1);
+    const hornMat = steel.clone(); hornMat.side = THREE.DoubleSide;
+    sensor.add(
+      at(mesh(new THREE.CylinderGeometry(Sn.housingR, Sn.housingR, Sn.housingH, 40), hBlue, 'awlrSensor'), xc, pt + Sn.housingH / 2, 0),
+      at(mesh(capGeo, hBlue.clone(), 'awlrSensor'), xc, pt + Sn.housingH - Sn.housingR * Math.cos(Math.PI / 4) * 0.5, 0),
+      at(mesh(new THREE.CylinderGeometry(Sn.housingR + 0.0004, Sn.housingR + 0.0004, 0.034, 16, 1, true, Math.PI / 2 - 0.4, 0.8), MAT.whitePl(), 'awlrSensor'), xc, pt + 0.07, 0),   // label
+      at(mesh(new THREE.CylinderGeometry(Sn.threadR, Sn.threadR, pt - yHorn + 0.004, 24), steel, 'awlrSensor'), xc, (pt + yHorn) / 2, 0),   // leher ulir
+      at(mesh(new THREE.CylinderGeometry(Sn.hornR0 + 0.004, Sn.hornR0 + 0.004, 0.006, 24), steel, 'awlrSensor'), xc, yHorn, 0),
+      at(mesh(new THREE.CylinderGeometry(Sn.hornR0, Sn.hornR1, Sn.hornL, 40, 1, true), hornMat, 'awlrSensor'), xc, yHorn - Sn.hornL / 2, 0),   // horn
+    );
+    const gland = at(mesh(new THREE.CylinderGeometry(0.007, 0.008, 0.014, 16).rotateX(Math.PI / 2), MAT.plastic(), 'awlrSensor'), xc, pt + 0.07, Sn.housingR + 0.007);
+    sensor.add(gland);
+    sNut.add(at(mesh(new THREE.CylinderGeometry(Sn.nutR, Sn.nutR, 0.018, 6), steel, 'awlrSensor'), xc, pb - 0.009, 0));   // mur kunci di bawah dudukan
+    const snTag = tag('Sensor radar level air', 'awlrSensor'); snTag.position.set(xc + Sn.housingR, pt + 0.06, 0); sensor.add(snTag);
+    const yBot = sensorBottom(yb);
+    const lvDim = dimension([xc + 0.12, yBot, 0], [xc + 0.12, RIVER.water, 0], [0.03, 0, 0], `${(yBot - RIVER.water).toFixed(2)} m ke muka air`, 12);
+    sensor.add(lvDim); U.lvDim = { dim: lvDim, x: xc + 0.12, yBot }; U.yBot = yBot;   // ikut muka air (env.js)
 
-  // ---------- Kabel sensor dalam conduit hitam → konektor SP21 kedua di box ----------
-  // Naik di sisi depan-kanan tiang (di belakang krangkeng), berbelok di bawah sleeve, lalu menyusuri sisi pipa bawah.
-  const cable = U.cable = newG();
-  const zc = POLE_GAP * Math.sin(Math.PI / 6), yG = pt + 0.07, zG = Sn.housingR + 0.014;
-  sp21Cable(S, {
-    slot: -1, wireToY: -0.1085, group: cable, phi: 30, yH: d.encY - 0.45,
-    route: [[POLE_GAP * Math.cos(Math.PI / 6), yA0 - 0.03, zc], [0.12, yA0 - 0.03, zc], [0.12, yb, zc], [xb1 - 0.12, yb, zc]],
-    endCable: [[xb1 - 0.135, yb, zc], [xb1 - 0.06, yb + 0.005, 0.045], [xb1 + 0.02, yG - 0.01, 0.078], [xc, yG, zG + 0.02], [xc, yG, zG - 0.004]],
-    tagText: 'Kabel sensor + conduit', tagAt: [1.2, yb - 0.02, zc + 0.01], plugTag: 'SP21 sensor',
-  });
+    // ---------- Kabel sensor dalam conduit hitam → konektor SP21 kedua di box ----------
+    // Naik di sisi depan-kanan tiang (di belakang krangkeng), berbelok di bawah sleeve, lalu menyusuri sisi pipa bawah.
+    const cable = U.cable = newG();
+    const zc = POLE_GAP * Math.sin(Math.PI / 6), yG = pt + 0.07, zG = Sn.housingR + 0.014;
+    sp21Cable(S, {
+      slot: -1, wireToY: -0.1085, group: cable, phi: 30, yH: d.encY - 0.45,
+      route: [[POLE_GAP * Math.cos(Math.PI / 6), yA0 - 0.03, zc], [0.12, yA0 - 0.03, zc], [0.12, yb, zc], [xb1 - 0.12, yb, zc]],
+      endCable: [[xb1 - 0.135, yb, zc], [xb1 - 0.06, yb + 0.005, 0.045], [xb1 + 0.02, yG - 0.01, 0.078], [xc, yG, zG + 0.02], [xc, yG, zG - 0.004]],
+      tagText: 'Kabel sensor + conduit', tagAt: [1.2, yb - 0.02, zc + 0.01], plugTag: 'SP21 sensor',
+    });
+  }
 
   // ---------- Sungai: bagian dari dunia bersama (world.js — alur, tebing berpita, pasangan batu, batu, air, pohon),
   // dibangun main.js sebagai lingkungan stasiun ini. Di sini hanya label & dimensi lebar muka air. ----------
@@ -268,7 +279,7 @@ function update(now, { model }) {
   if (!U) return false;
   const dh = U.level();
   if (U.lastDh === null || Math.abs(dh - U.lastDh) > 0.002) {
-    U.lastDh = dh; setDim(U.lvDim, RIVER.water + dh); U.rv.position.y = dh;
+    U.lastDh = dh; if (U.lvDim) setDim(U.lvDim, RIVER.water + dh); U.rv.position.y = dh;
   }
   if (ui && now - ui.t > 200) { ui.t = now; ui.sync(); }
   return false;
@@ -325,10 +336,12 @@ const explode = {
   ],
   apply(model, seg) {
     const U = model.userData.awlr;
-    const eN = seg('sensor', 0, 0.35), eS = seg('sensor', 0.3, 1);
-    U.sNut.position.set(0.35 * eS, -0.012 * eN, 0);        // mur dikendurkan lalu ikut sensor
-    U.sensor.position.x = 0.35 * eS;                       // leher ulir keluar lewat slot terbuka
-    U.cable.position.set(0.3 * seg('cable', 0.44, 1), -0.18 * seg('cable', 0, 0.44), 0);   // turun keluar lubang mesh, lalu +X
+    if (U.sensor) {
+      const eN = seg('sensor', 0, 0.35), eS = seg('sensor', 0.3, 1);
+      U.sNut.position.set(0.35 * eS, -0.012 * eN, 0);      // mur dikendurkan lalu ikut sensor
+      U.sensor.position.x = 0.35 * eS;                     // leher ulir keluar lewat slot terbuka
+      U.cable.position.set(0.3 * seg('cable', 0.44, 1), -0.18 * seg('cable', 0, 0.44), 0);   // turun keluar lubang mesh, lalu +X
+    }
     U.sling.position.z = 0.35 * seg('arm', 0, 0.16);
     const eScN = seg('arm', 0.1, 0.22), eScB = seg('arm', 0.18, 0.32), eScH = seg('arm', 0.28, 0.44);
     U.scNuts.position.z = 0.06 * eScN + 0.25 * eScH;
